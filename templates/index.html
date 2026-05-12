@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Relatório de Cores</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="page-shell">
+    <header class="page-header">
+      <div>
+        <h1>Relatório de cores</h1>
+      </div>
+    </header>
+
+    <section class="filters-bar" aria-label="Filtros do relatório">
+      <label>
+        <span>Mês</span>
+        <select id="month"></select>
+      </label>
+      <label>
+        <span>Ano</span>
+        <select id="year"></select>
+      </label>
+      <label class="filter-text">
+        <span>Veículo</span>
+        <select id="vehicle" multiple hidden></select>
+        <div id="vehiclePicker" class="multi-picker"></div>
+      </label>
+      <label class="filter-text">
+        <span>Câmeras</span>
+        <select id="camera" multiple hidden></select>
+        <div id="cameraPicker" class="multi-picker"></div>
+      </label>
+      <button id="resetFilters" class="ghost" type="button">Limpar filtros</button>
+    </section>
+
+    <section class="summary-grid" id="summaryGrid"></section>
+    <section id="statusMessage" class="status-message hidden"></section>
+
+    <section class="panel daily-panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-label">Últimos 7 dias</p>
+          <h2>Resumo diário</h2>
+        </div>
+      </div>
+      <div id="dailyOverview" class="daily-overview"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-label">Destaques</p>
+          <h2>Câmeras com maior volume</h2>
+        </div>
+      </div>
+      <div id="topRows" class="top-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <div>
+          <p class="panel-label">Consolidado</p>
+          <h2>Matriz por veículo</h2>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="matrixTable">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <template id="summaryCardTemplate">
+    <article class="summary-card">
+      <p class="summary-title"></p>
+      <strong class="summary-value"></strong>
+      <span class="summary-note"></span>
+    </article>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
