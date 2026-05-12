@@ -7,6 +7,7 @@ import threading
 import traceback
 import shutil
 import time
+import calendar
 from datetime import date, datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -93,6 +94,19 @@ def parse_multi_filter(query: Dict[str, List[str]], key: str) -> List[str]:
     for raw_value in query.get(key, []):
         values.extend(part.strip() for part in raw_value.split(","))
     return [value for value in values if value]
+
+
+def build_month_dates(month: int, year: int) -> List[str]:
+    today = date.today()
+    last_day = calendar.monthrange(year, month)[1]
+    end_day = last_day
+    if year == today.year and month == today.month:
+        end_day = today.day
+
+    return [
+        date(year, month, day).isoformat()
+        for day in range(end_day, 0, -1)
+    ]
 
 
 def get_level(count: int) -> str:
@@ -825,16 +839,6 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             params,
         ).fetchall()
 
-        timeline_rows = connection.execute(
-            """
-            SELECT DISTINCT capture_date
-            FROM indexed_files
-            WHERE capture_date >= ? AND capture_date < ?
-            ORDER BY capture_date
-            """,
-            (month_start, next_month_start),
-        ).fetchall()
-
         inventory_clauses = ["1 = 1"]
         inventory_params: List[str] = []
         if vehicle_filters:
@@ -1004,14 +1008,10 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key]["latest_file"], row["latest_file"]
         ) if matrix[matrix_key]["latest_file"] else row["latest_file"]
 
-    today = date.today()
-    for row in timeline_rows:
-        date_totals.setdefault(row["capture_date"], 0)
+    dates = build_month_dates(month, year)
+    for capture_date in dates:
+        date_totals.setdefault(capture_date, 0)
 
-    if year == today.year and month == today.month:
-        date_totals.setdefault(today.isoformat(), 0)
-
-    dates = sorted(date_totals.keys(), reverse=True)
     matrix_rows = []
     for row in matrix.values():
         matrix_rows.append(
