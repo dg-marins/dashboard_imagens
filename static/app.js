@@ -227,9 +227,34 @@ function formatNumber(value) {
   return new Intl.NumberFormat("pt-BR").format(value || 0);
 }
 
+function formatDate(value) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return value || "";
+  const [year, month, day] = value.split("-");
+  return `${day}-${month}-${year}`;
+}
+
+function formatSlashDate(value) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return value || "";
+  const [year, month, day] = value.split("-");
+  return `${day}/${month}/${year}`;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const amount = bytes / (1024 ** index);
+  const decimals = 1;
+  return `${new Intl.NumberFormat("pt-BR", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(amount)} ${units[index]}`;
+}
+
 function formatTimestamp(value) {
   if (!value) return "Sem captura";
-  return value;
+  return formatDate(value);
 }
 
 function formatConnectionTimestamp(value) {
@@ -239,6 +264,12 @@ function formatConnectionTimestamp(value) {
   const time = date.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
   const day = date.toLocaleDateString("pt-BR");
   return `${time}<br>${day}`;
+}
+
+function formatMatrixHeaderDate(value) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return value || "";
+  const [year, month, day] = value.split("-");
+  return `${day}/${month}/${year.slice(2)}`;
 }
 
 function currentMatrixDates() {
@@ -337,11 +368,10 @@ function renderLoadingMatrix(dates = currentMatrixDates()) {
 
   const headRow = document.createElement("tr");
   headRow.innerHTML = `
-    <th class="sticky" style="min-width:150px">Frota</th>
-    <th class="sticky-2" style="min-width:220px">CÃ¢meras</th>
-    <th>Total</th>
+    <th class="sticky vehicle-column" style="min-width:150px">Frota</th>
+    <th class="sticky-2" style="min-width:220px">Câmeras</th>
     <th>Dias</th>
-    ${dates.map((date) => `<th>${date.slice(8, 10)}</th>`).join("")}
+    ${dates.map((date) => `<th>${formatMatrixHeaderDate(date)}</th>`).join("")}
   `;
   thead.appendChild(headRow);
 
@@ -350,7 +380,6 @@ function renderLoadingMatrix(dates = currentMatrixDates()) {
     row.innerHTML = `
       <td class="sticky"><span class="skeleton-line w-60"></span></td>
       <td class="sticky-2"><span class="skeleton-line w-80"></span></td>
-      <td><span class="skeleton-line w-40 center"></span></td>
       <td><span class="skeleton-line w-30 center"></span></td>
       ${dates.map(() => `
         <td class="${index % 3 === 0 ? "cell-medium" : "cell-none"} skeleton-cell">
@@ -518,11 +547,25 @@ function renderDaily(days) {
     const article = document.createElement("article");
     article.className = "day-card";
     article.innerHTML = `
-      <span>${day.date}</span>
-      <strong data-update-key="daily-${day.date}-total">${formatNumber(day.total)}</strong>
-      <small>${formatNumber(day.active_cameras)} câmeras</small>
+      <dl class="daily-metrics">
+        <div>
+          <dt>Data:</dt>
+          <dd>${formatSlashDate(day.date)}</dd>
+        </div>
+        <div>
+          <dt>Veiculos:</dt>
+          <dd data-update-key="daily-${day.date}-vehicles">${formatNumber(day.vehicles)}</dd>
+        </div>
+        <div>
+          <dt>Volume:</dt>
+          <dd data-update-key="daily-${day.date}-volume">${formatBytes(day.total_size_bytes)}</dd>
+        </div>
+        <div>
+          <dt>Arquivos:</dt>
+          <dd data-update-key="daily-${day.date}-total">${formatNumber(day.total)}</dd>
+        </div>
+      </dl>
     `;
-    article.querySelector("small").dataset.updateKey = `daily-${day.date}-cameras`;
     dailyOverview.appendChild(article);
   });
 }
@@ -557,17 +600,16 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
 
   const headRow = document.createElement("tr");
   headRow.innerHTML = `
-    <th class="sticky" style="min-width:150px">Frota: ${formatNumber(fleetTotal)}</th>
+    <th class="sticky vehicle-column" style="min-width:150px">Frota: ${formatNumber(fleetTotal)}</th>
     <th class="sticky-2" style="min-width:220px">Câmeras</th>
-    <th>Total</th>
     <th>Dias</th>
-    ${dates.map((date) => `<th>${date.slice(8, 10)}</th>`).join("")}
+    ${dates.map((date) => `<th>${formatMatrixHeaderDate(date)}</th>`).join("")}
   `;
   thead.appendChild(headRow);
 
   if (!rows.length) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="${dates.length + 4}" class="muted">Nenhum registro encontrado.</td>`;
+    row.innerHTML = `<td colspan="${dates.length + 3}" class="muted">Nenhum registro encontrado.</td>`;
     tbody.appendChild(row);
     return;
   }
@@ -602,9 +644,8 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
       .join("");
 
     tr.innerHTML = `
-      <td class="sticky">${entry.vehicle}</td>
-      <td class="sticky-2"><div class="camera-stack">${cameras}</div></td>
-      <td data-update-key="row-${entry.vehicle}-total">${formatNumber(entry.total)}</td>
+      <td class="sticky vehicle-column">${entry.vehicle}</td>
+      <td class="sticky-2"><div class="camera-stack camera-grid">${cameras}</div></td>
       <td data-update-key="row-${entry.vehicle}-days">${formatNumber(entry.active_days)}</td>
       ${dayCells}
     `;

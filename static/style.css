@@ -741,6 +741,37 @@ button.ghost:hover {
   white-space: nowrap;
 }
 
+.daily-metrics {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.daily-metrics div {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.daily-metrics dt,
+.daily-metrics dd {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.daily-metrics dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.daily-metrics dd {
+  color: var(--ink);
+  font-weight: 850;
+  text-align: right;
+}
+
 .day-card strong,
 .top-card strong {
   display: block;
@@ -758,6 +789,10 @@ button.ghost:hover {
   overflow-wrap: anywhere;
   font-size: 0.8rem;
   font-style: normal;
+}
+
+.day-card small span {
+  display: block;
 }
 
 .table-wrap {
@@ -803,7 +838,7 @@ td.sticky {
   position: sticky;
   left: 0;
   z-index: 1;
-  text-align: left;
+  text-align: center;
   background: #fff;
 }
 
@@ -812,8 +847,12 @@ td.sticky-2 {
   position: sticky;
   left: 150px;
   z-index: 1;
-  text-align: left;
+  text-align: center;
   background: #fff;
+}
+
+td.vehicle-column {
+  font-weight: 850;
 }
 
 thead th.sticky,
@@ -877,8 +916,16 @@ td[class^="cell-"] {
 .camera-stack {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 4px;
   margin-top: 7px;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  justify-content: center;
+  align-items: center;
 }
 
 .camera-chip {
@@ -893,6 +940,41 @@ td[class^="cell-"] {
   font-size: 0.74rem;
   line-height: 1.2;
   text-overflow: ellipsis;
+}
+
+.camera-total-stack {
+  display: grid;
+  gap: 5px;
+  justify-content: center;
+}
+
+.camera-total-chip {
+  display: grid;
+  grid-template-columns: minmax(58px, max-content) minmax(48px, max-content) minmax(58px, max-content);
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: rgba(38, 57, 67, 0.07);
+  color: var(--ink);
+  font-size: 0.72rem;
+  line-height: 1.15;
+}
+
+.camera-total-chip b,
+.camera-total-chip span,
+.camera-total-chip em {
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.camera-total-chip b {
+  text-align: left;
+}
+
+.camera-total-chip span,
+.camera-total-chip em {
+  text-align: right;
 }
 
 

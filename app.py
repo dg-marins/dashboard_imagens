@@ -1577,6 +1577,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
                 camera,
                 capture_date,
                 COUNT(*) AS total,
+                COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
                 MAX(file_name) AS latest_file
             FROM indexed_files
             WHERE {where_sql}
@@ -1744,6 +1745,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             ).fetchall()
 
     date_totals: Dict[str, int] = {}
+    date_sizes: Dict[str, int] = {}
+    date_vehicles: Dict[str, set] = {}
     matrix: Dict[str, dict] = {}
     top_by_camera: Dict[Tuple[str, str], dict] = {}
     active_vehicles = set()
@@ -1765,6 +1768,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key] = {
                 "vehicle": row["vehicle"],
                 "cameras": set(),
+                "camera_totals": {},
                 "total": 0,
                 "active_days": set(),
                 "days": {},
@@ -1781,6 +1785,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         active_days.add(capture_date)
         latest_capture = max(latest_capture, row["latest_file"]) if latest_capture else row["latest_file"]
         date_totals[capture_date] = date_totals.get(capture_date, 0) + count
+        date_sizes[capture_date] = date_sizes.get(capture_date, 0) + (row["total_size_bytes"] or 0)
+        date_vehicles.setdefault(capture_date, set()).add(row["vehicle"])
 
         top_key = (row["vehicle"], row["camera"])
         if top_key not in top_by_camera:
@@ -1804,6 +1810,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key] = {
                 "vehicle": row["vehicle"],
                 "cameras": set(),
+                "camera_totals": {},
                 "total": 0,
                 "active_days": set(),
                 "days": {},
@@ -1813,6 +1820,12 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         matrix[matrix_key]["total"] += count
         matrix[matrix_key]["active_days"].add(capture_date)
         matrix[matrix_key]["cameras"].add(row["camera"])
+        camera_total = matrix[matrix_key]["camera_totals"].setdefault(
+            row["camera"],
+            {"name": row["camera"], "count": 0, "size_bytes": 0},
+        )
+        camera_total["count"] += count
+        camera_total["size_bytes"] += row["total_size_bytes"] or 0
         if capture_date not in matrix[matrix_key]["days"]:
             matrix[matrix_key]["days"][capture_date] = {
                 "count": 0,
@@ -1842,6 +1855,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
     dates = build_month_dates(month, year)
     for capture_date in dates:
         date_totals.setdefault(capture_date, 0)
+        date_sizes.setdefault(capture_date, 0)
+        date_vehicles.setdefault(capture_date, set())
 
     matrix_rows = []
     for row in matrix.values():
@@ -1849,6 +1864,10 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             {
                 "vehicle": row["vehicle"],
                 "cameras": sorted(row["cameras"], key=vehicle_sort_key),
+                "camera_totals": sorted(
+                    row["camera_totals"].values(),
+                    key=lambda item: vehicle_sort_key(item["name"]),
+                ),
                 "camera_count": len(row["cameras"]),
                 "total": row["total"],
                 "active_days": len(row["active_days"]),
@@ -1941,7 +1960,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             {
                 "date": date,
                 "total": date_totals[date],
-                "active_cameras": sum(len(row["days"][date]["cameras"]) for row in matrix_rows if date in row["days"]),
+                "vehicles": len(date_vehicles[date]),
+                "total_size_bytes": date_sizes[date],
             }
             for date in dates
         ],
