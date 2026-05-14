@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import List, Tuple
 
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_FILE = Path(os.getenv("IMAGE_DASHBOARD_CONFIG_FILE", str(BASE_DIR / "dashboard_config.json")))
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_FILE = Path(os.getenv("IMAGE_DASHBOARD_CONFIG_FILE", str(BASE_DIR / "config" / "dashboard_config.json")))
 
 
 def load_config_overrides() -> dict:
@@ -63,7 +63,9 @@ TEMPLATE_DIR = BASE_DIR / "templates"
 
 IMAGE_ROOT = Path(setting("IMAGE_DASHBOARD_ROOT", "/home/publico/imagens"))
 LOCAL_GARAGE = setting("IMAGE_DASHBOARD_GARAGE", "G1").strip() or "G1"
-DB_PATH = Path(setting("IMAGE_DASHBOARD_DB", str(BASE_DIR / "dashboard_imagens.db")))
+DB_ENGINE = setting("IMAGE_DASHBOARD_DB_ENGINE", "sqlite").strip().lower()
+DB_PATH = Path(setting("IMAGE_DASHBOARD_DB", str(BASE_DIR / "db" / "dashboard_imagens.db")))
+POSTGRES_DSN = setting("IMAGE_DASHBOARD_POSTGRES_DSN", "").strip()
 
 HOST = setting("IMAGE_DASHBOARD_HOST", "0.0.0.0")
 PORT = env_int("IMAGE_DASHBOARD_PORT", "8081")
@@ -94,6 +96,7 @@ VIDEO_EXTENSIONS = set(env_list("IMAGE_DASHBOARD_VIDEO_EXTENSIONS", ".mp4,.avi,.
 DAY_LEVELS = env_day_levels("IMAGE_DASHBOARD_DAY_LEVELS", "0:none,1:low,25:medium,100:high")
 ALERT_DAYS_WITHOUT_FILES = env_int("IMAGE_DASHBOARD_ALERT_DAYS_WITHOUT_FILES", "3")
 TOP_ROWS_LIMIT = env_int("IMAGE_DASHBOARD_TOP_ROWS_LIMIT", "8")
+DASHBOARD_CACHE_SECONDS = env_int("IMAGE_DASHBOARD_CACHE_SECONDS", "20")
 
 SQLITE_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "30")
 SQLITE_JOURNAL_MODE = setting("IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "WAL")

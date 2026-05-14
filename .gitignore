@@ -4,6 +4,7 @@ __pycache__/
 
 .env
 dashboard_config.json
+config/*.json
 .venv/
 venv/
 env/

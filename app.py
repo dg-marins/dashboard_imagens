@@ -16,14 +16,23 @@ from typing import Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:
+    psycopg2 = None
+    RealDictCursor = None
+
 import config
 from config import (
     ALERT_DAYS_WITHOUT_FILES,
     AUTO_SCAN_ON_START,
     CONFIG_FILE,
+    DB_ENGINE,
     DB_PATH,
     DB_STATUS_TIMEOUT_SECONDS,
     DATE_DIR_REGEX,
+    DASHBOARD_CACHE_SECONDS,
     DAY_LEVELS,
     DURATION_INTERVAL_SECONDS,
     DURATION_UPDATE_BATCH_SIZE,
@@ -36,6 +45,7 @@ from config import (
     INDEX_FILE_BATCH_SIZE,
     LOCAL_GARAGE,
     PORT,
+    POSTGRES_DSN,
     REMOTE_EXPORT_BATCH_SIZE,
     REMOTE_FULL_SYNC_DAYS,
     REMOTE_FULL_SYNC_INTERVAL_SECONDS,
@@ -108,11 +118,16 @@ REMOTE_SYNC_STATE = {
 FFPROBE_AVAILABLE: Optional[bool] = None
 SCHEDULER_LOCK = threading.Lock()
 SCHEDULERS_STARTED = set()
+DASHBOARD_CACHE_LOCK = threading.Lock()
+DASHBOARD_BUILD_LOCK = threading.Lock()
+DASHBOARD_CACHE: Dict[str, Tuple[float, dict]] = {}
 
 CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_ROOT", "global": "IMAGE_ROOT", "type": "path", "group": "Arquivos", "label": "Diretorio de imagens", "live": True},
     {"name": "IMAGE_DASHBOARD_GARAGE", "global": "LOCAL_GARAGE", "type": "str", "group": "Arquivos", "label": "Garagem local", "live": True},
-    {"name": "IMAGE_DASHBOARD_DB", "global": "DB_PATH", "type": "path", "group": "Arquivos", "label": "Banco SQLite", "live": False},
+    {"name": "IMAGE_DASHBOARD_DB_ENGINE", "global": "DB_ENGINE", "type": "str", "group": "Banco", "label": "Banco (sqlite/postgres)", "live": False},
+    {"name": "IMAGE_DASHBOARD_DB", "global": "DB_PATH", "type": "path", "group": "Banco", "label": "Arquivo SQLite", "live": False},
+    {"name": "IMAGE_DASHBOARD_POSTGRES_DSN", "global": "POSTGRES_DSN", "type": "str", "group": "Banco", "label": "Postgres DSN", "live": False},
     {"name": "IMAGE_DASHBOARD_HOST", "global": "HOST", "type": "str", "group": "Servidor", "label": "Host", "live": False},
     {"name": "IMAGE_DASHBOARD_PORT", "global": "PORT", "type": "int", "group": "Servidor", "label": "Porta", "live": False},
     {"name": "IMAGE_DASHBOARD_AUTO_SCAN", "global": "AUTO_SCAN_ON_START", "type": "bool", "group": "Indexacao", "label": "Indexar ao iniciar", "live": True},
@@ -139,6 +154,7 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_DAY_LEVELS", "global": "DAY_LEVELS", "type": "day_levels", "group": "Relatorio", "label": "Niveis da matriz", "live": True},
     {"name": "IMAGE_DASHBOARD_ALERT_DAYS_WITHOUT_FILES", "global": "ALERT_DAYS_WITHOUT_FILES", "type": "int", "group": "Relatorio", "label": "Dias para alerta", "live": True},
     {"name": "IMAGE_DASHBOARD_TOP_ROWS_LIMIT", "global": "TOP_ROWS_LIMIT", "type": "int", "group": "Relatorio", "label": "Limite de destaques", "live": True},
+    {"name": "IMAGE_DASHBOARD_CACHE_SECONDS", "global": "DASHBOARD_CACHE_SECONDS", "type": "int", "group": "Relatorio", "label": "Cache do dashboard (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "global": "SQLITE_TIMEOUT_SECONDS", "type": "int", "group": "SQLite", "label": "Timeout SQLite (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "global": "SQLITE_JOURNAL_MODE", "type": "str", "group": "SQLite", "label": "Journal mode", "live": True},
     {"name": "IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "global": "SQLITE_SYNCHRONOUS", "type": "str", "group": "SQLite", "label": "Synchronous", "live": True},
@@ -252,6 +268,7 @@ def update_config_payload(payload: dict) -> dict:
     FFPROBE_AVAILABLE = None
 
     save_config_overrides(current_overrides)
+    invalidate_dashboard_cache()
     start_background_schedulers()
     return {
         "status": "ok",
@@ -322,7 +339,74 @@ def vehicle_sort_key(value: str) -> Tuple[int, object]:
     return (1, cleaned.lower())
 
 
-def open_db(timeout_seconds: int = SQLITE_TIMEOUT_SECONDS) -> sqlite3.Connection:
+class PostgresCursor:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    @property
+    def rowcount(self) -> int:
+        return self.cursor.rowcount
+
+    def fetchone(self):
+        return self.cursor.fetchone()
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+    def __iter__(self):
+        return iter(self.cursor)
+
+
+class PostgresConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type:
+            self.connection.rollback()
+        self.connection.close()
+
+    def execute(self, sql: str, params=()):
+        cursor = self.connection.cursor()
+        cursor.execute(sql.replace("?", "%s"), params or ())
+        return PostgresCursor(cursor)
+
+    def executemany(self, sql: str, params):
+        cursor = self.connection.cursor()
+        cursor.executemany(sql.replace("?", "%s"), params)
+        return PostgresCursor(cursor)
+
+    def executescript(self, sql: str) -> None:
+        cursor = self.connection.cursor()
+        for statement in sql.split(";"):
+            statement = statement.strip()
+            if statement:
+                cursor.execute(statement)
+
+    def commit(self) -> None:
+        self.connection.commit()
+
+    def rollback(self) -> None:
+        self.connection.rollback()
+
+
+def is_postgres() -> bool:
+    return DB_ENGINE in {"postgres", "postgresql"}
+
+
+def open_db(timeout_seconds: int = SQLITE_TIMEOUT_SECONDS):
+    if is_postgres():
+        if psycopg2 is None:
+            raise RuntimeError("Instale psycopg2-binary para usar PostgreSQL: pip install psycopg2-binary")
+        if not POSTGRES_DSN:
+            raise RuntimeError("Configure IMAGE_DASHBOARD_POSTGRES_DSN para usar PostgreSQL.")
+        connection = psycopg2.connect(POSTGRES_DSN, connect_timeout=max(1, int(timeout_seconds)), cursor_factory=RealDictCursor)
+        return PostgresConnection(connection)
+
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH, timeout=timeout_seconds)
     connection.row_factory = sqlite3.Row
     connection.execute(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE}")
@@ -333,77 +417,182 @@ def open_db(timeout_seconds: int = SQLITE_TIMEOUT_SECONDS) -> sqlite3.Connection
     return connection
 
 
-def ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, column_sql: str) -> None:
-    columns = {
-        row["name"]
-        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-    }
+def ensure_column(connection, table_name: str, column_name: str, column_sql: str) -> None:
+    if is_postgres():
+        columns = {
+            row["column_name"]
+            for row in connection.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = ?
+                """,
+                (table_name,),
+            ).fetchall()
+        }
+    else:
+        columns = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
     if column_name not in columns:
         connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}")
 
 
 def ensure_database() -> None:
     with open_db() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS indexed_files (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                garage TEXT NOT NULL DEFAULT 'G1',
-                vehicle TEXT NOT NULL,
-                camera TEXT NOT NULL,
-                capture_date TEXT NOT NULL,
-                file_name TEXT NOT NULL,
-                extension TEXT NOT NULL,
-                relative_dir TEXT NOT NULL,
-                relative_file_path TEXT NOT NULL UNIQUE,
-                source_path TEXT NOT NULL,
-                real_path TEXT NOT NULL,
-                size_bytes INTEGER,
-                modified_at TEXT,
-                indexed_at TEXT NOT NULL
-            );
+        if is_postgres():
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS indexed_files (
+                    id BIGSERIAL PRIMARY KEY,
+                    garage TEXT NOT NULL DEFAULT 'G1',
+                    vehicle TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    capture_date TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    extension TEXT NOT NULL,
+                    relative_dir TEXT NOT NULL,
+                    relative_file_path TEXT NOT NULL UNIQUE,
+                    source_path TEXT NOT NULL,
+                    real_path TEXT NOT NULL,
+                    size_bytes BIGINT,
+                    duration_seconds DOUBLE PRECISION,
+                    modified_at TEXT,
+                    indexed_at TEXT NOT NULL,
+                    last_seen_scan_id TEXT
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_indexed_files_month
-                ON indexed_files (capture_date, vehicle, camera);
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_month
+                    ON indexed_files (capture_date, vehicle, camera);
 
-            CREATE INDEX IF NOT EXISTS idx_indexed_files_vehicle_camera
-                ON indexed_files (vehicle, camera);
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_vehicle_camera
+                    ON indexed_files (vehicle, camera);
 
-            CREATE INDEX IF NOT EXISTS idx_indexed_files_capture_extension
-                ON indexed_files (capture_date, extension);
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_capture_extension
+                    ON indexed_files (capture_date, extension);
 
-            CREATE INDEX IF NOT EXISTS idx_indexed_files_vehicle_capture
-                ON indexed_files (vehicle, capture_date);
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_vehicle_capture
+                    ON indexed_files (vehicle, capture_date);
 
-            CREATE TABLE IF NOT EXISTS camera_inventory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                garage TEXT NOT NULL DEFAULT 'G1',
-                vehicle TEXT NOT NULL,
-                camera TEXT NOT NULL,
-                source_dir TEXT NOT NULL UNIQUE,
-                real_dir TEXT NOT NULL,
-                indexed_at TEXT NOT NULL
-            );
+                CREATE TABLE IF NOT EXISTS camera_inventory (
+                    id BIGSERIAL PRIMARY KEY,
+                    garage TEXT NOT NULL DEFAULT 'G1',
+                    vehicle TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    source_dir TEXT NOT NULL UNIQUE,
+                    real_dir TEXT NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    last_seen_scan_id TEXT
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_camera_inventory_vehicle_camera
-                ON camera_inventory (vehicle, camera);
+                CREATE INDEX IF NOT EXISTS idx_camera_inventory_vehicle_camera
+                    ON camera_inventory (vehicle, camera);
 
-            CREATE INDEX IF NOT EXISTS idx_camera_inventory_camera_vehicle
-                ON camera_inventory (camera, vehicle);
+                CREATE INDEX IF NOT EXISTS idx_camera_inventory_camera_vehicle
+                    ON camera_inventory (camera, vehicle);
 
-            CREATE TABLE IF NOT EXISTS app_metadata (
-                meta_key TEXT PRIMARY KEY,
-                meta_value TEXT NOT NULL
-            );
-            """
-        )
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    meta_key TEXT PRIMARY KEY,
+                    meta_value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS vehicle_camera_day_summary (
+                    garage TEXT NOT NULL,
+                    vehicle TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    capture_date TEXT NOT NULL,
+                    total_files BIGINT NOT NULL DEFAULT 0,
+                    total_size_bytes BIGINT NOT NULL DEFAULT 0,
+                    latest_file TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (garage, vehicle, camera, capture_date)
+                );
+                """
+            )
+        else:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS indexed_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    garage TEXT NOT NULL DEFAULT 'G1',
+                    vehicle TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    capture_date TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    extension TEXT NOT NULL,
+                    relative_dir TEXT NOT NULL,
+                    relative_file_path TEXT NOT NULL UNIQUE,
+                    source_path TEXT NOT NULL,
+                    real_path TEXT NOT NULL,
+                    size_bytes INTEGER,
+                    modified_at TEXT,
+                    indexed_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_month
+                    ON indexed_files (capture_date, vehicle, camera);
+
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_vehicle_camera
+                    ON indexed_files (vehicle, camera);
+
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_capture_extension
+                    ON indexed_files (capture_date, extension);
+
+                CREATE INDEX IF NOT EXISTS idx_indexed_files_vehicle_capture
+                    ON indexed_files (vehicle, capture_date);
+
+                CREATE TABLE IF NOT EXISTS camera_inventory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    garage TEXT NOT NULL DEFAULT 'G1',
+                    vehicle TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    source_dir TEXT NOT NULL UNIQUE,
+                    real_dir TEXT NOT NULL,
+                    indexed_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_camera_inventory_vehicle_camera
+                    ON camera_inventory (vehicle, camera);
+
+                CREATE INDEX IF NOT EXISTS idx_camera_inventory_camera_vehicle
+                    ON camera_inventory (camera, vehicle);
+
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    meta_key TEXT PRIMARY KEY,
+                    meta_value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS vehicle_camera_day_summary (
+                    garage TEXT NOT NULL,
+                    vehicle TEXT NOT NULL,
+                    camera TEXT NOT NULL,
+                    capture_date TEXT NOT NULL,
+                    total_files INTEGER NOT NULL DEFAULT 0,
+                    total_size_bytes INTEGER NOT NULL DEFAULT 0,
+                    latest_file TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (garage, vehicle, camera, capture_date)
+                );
+                """
+            )
         ensure_column(connection, "indexed_files", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "indexed_files", "last_seen_scan_id", "TEXT")
-        ensure_column(connection, "indexed_files", "duration_seconds", "REAL")
+        ensure_column(connection, "indexed_files", "duration_seconds", "DOUBLE PRECISION" if is_postgres() else "REAL")
         ensure_column(connection, "camera_inventory", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "camera_inventory", "last_seen_scan_id", "TEXT")
         connection.executescript(
             """
+            CREATE INDEX IF NOT EXISTS idx_vehicle_camera_day_summary_month
+                ON vehicle_camera_day_summary (capture_date, vehicle, camera);
+
+            CREATE INDEX IF NOT EXISTS idx_vehicle_camera_day_summary_garage_month
+                ON vehicle_camera_day_summary (garage, capture_date, vehicle, camera);
+
+            CREATE INDEX IF NOT EXISTS idx_vehicle_camera_day_summary_vehicle_capture
+                ON vehicle_camera_day_summary (vehicle, capture_date);
+
             CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_month
                 ON indexed_files (garage, capture_date, vehicle, camera);
 
@@ -435,6 +624,157 @@ def get_metadata() -> Dict[str, str]:
     with open_db() as connection:
         rows = connection.execute("SELECT meta_key, meta_value FROM app_metadata").fetchall()
     return {row["meta_key"]: row["meta_value"] for row in rows}
+
+
+def invalidate_dashboard_cache() -> None:
+    with DASHBOARD_CACHE_LOCK:
+        DASHBOARD_CACHE.clear()
+
+
+def dashboard_cache_key(query: Dict[str, List[str]]) -> str:
+    normalized = [
+        (key, tuple(sorted(str(value) for value in values)))
+        for key, values in sorted(query.items())
+        if not key.startswith("_")
+    ]
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+
+
+def summary_has_rows(connection: sqlite3.Connection) -> bool:
+    row = connection.execute("SELECT 1 FROM vehicle_camera_day_summary LIMIT 1").fetchone()
+    return row is not None
+
+
+def rebuild_summary_for_dates(connection: sqlite3.Connection, garage: str, dates: set) -> None:
+    if not dates:
+        return
+    updated_at = iso_now()
+    for capture_date in sorted(dates):
+        connection.execute(
+            """
+            DELETE FROM vehicle_camera_day_summary
+            WHERE garage = ?
+              AND capture_date = ?
+            """,
+            (garage, capture_date),
+        )
+        connection.execute(
+            """
+            INSERT INTO vehicle_camera_day_summary (
+                garage,
+                vehicle,
+                camera,
+                capture_date,
+                total_files,
+                total_size_bytes,
+                latest_file,
+                updated_at
+            )
+            SELECT
+                garage,
+                vehicle,
+                camera,
+                capture_date,
+                COUNT(*) AS total_files,
+                COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
+                MAX(file_name) AS latest_file,
+                ? AS updated_at
+            FROM indexed_files
+            WHERE garage = ?
+              AND capture_date = ?
+            GROUP BY garage, vehicle, camera, capture_date
+            """,
+            (updated_at, garage, capture_date),
+        )
+
+
+def rebuild_summary_for_range(connection: sqlite3.Connection, garage: str, start_date: str, end_date: str) -> None:
+    updated_at = iso_now()
+    connection.execute(
+        """
+        DELETE FROM vehicle_camera_day_summary
+        WHERE garage = ?
+          AND capture_date >= ?
+          AND capture_date < ?
+        """,
+        (garage, start_date, end_date),
+    )
+    connection.execute(
+        """
+        INSERT INTO vehicle_camera_day_summary (
+            garage,
+            vehicle,
+            camera,
+            capture_date,
+            total_files,
+            total_size_bytes,
+            latest_file,
+            updated_at
+        )
+        SELECT
+            garage,
+            vehicle,
+            camera,
+            capture_date,
+            COUNT(*) AS total_files,
+            COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
+            MAX(file_name) AS latest_file,
+            ? AS updated_at
+        FROM indexed_files
+        WHERE garage = ?
+          AND capture_date >= ?
+          AND capture_date < ?
+        GROUP BY garage, vehicle, camera, capture_date
+        """,
+        (updated_at, garage, start_date, end_date),
+    )
+
+
+def bootstrap_summary_if_needed() -> None:
+    try:
+        with open_db() as connection:
+            metadata = {
+                row["meta_key"]: row["meta_value"]
+                for row in connection.execute("SELECT meta_key, meta_value FROM app_metadata").fetchall()
+            }
+            if metadata.get("summary_bootstrapped") == "1" and summary_has_rows(connection):
+                return
+            print("Montando agregados iniciais do dashboard...")
+            updated_at = iso_now()
+            connection.execute("DELETE FROM vehicle_camera_day_summary")
+            connection.execute(
+                """
+                INSERT INTO vehicle_camera_day_summary (
+                    garage,
+                    vehicle,
+                    camera,
+                    capture_date,
+                    total_files,
+                    total_size_bytes,
+                    latest_file,
+                    updated_at
+                )
+                SELECT
+                    garage,
+                    vehicle,
+                    camera,
+                    capture_date,
+                    COUNT(*) AS total_files,
+                    COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
+                    MAX(file_name) AS latest_file,
+                    ? AS updated_at
+                FROM indexed_files
+                GROUP BY garage, vehicle, camera, capture_date
+                """,
+                (updated_at,),
+            )
+            set_metadata(connection, "summary_bootstrapped", "1")
+            connection.commit()
+            invalidate_dashboard_cache()
+            print("Agregados iniciais do dashboard prontos.")
+    except Exception as exc:
+        print(f"[ERRO] Falha ao montar agregados iniciais: {exc}")
+        traceback.print_exc()
 
 
 def safe_scandir(path: Path) -> List[os.DirEntry]:
@@ -518,8 +858,15 @@ def update_duration_state(**kwargs: object) -> None:
 def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None:
     if not batch:
         return
+    same_file_condition = (
+        "indexed_files.size_bytes IS NOT DISTINCT FROM excluded.size_bytes "
+        "AND indexed_files.modified_at IS NOT DISTINCT FROM excluded.modified_at"
+        if is_postgres()
+        else "indexed_files.size_bytes IS excluded.size_bytes "
+        "AND indexed_files.modified_at IS excluded.modified_at"
+    )
     connection.executemany(
-        """
+        f"""
         INSERT INTO indexed_files (
             garage,
             vehicle,
@@ -549,8 +896,7 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
             real_path = excluded.real_path,
             size_bytes = excluded.size_bytes,
             duration_seconds = CASE
-                WHEN indexed_files.size_bytes IS excluded.size_bytes
-                 AND indexed_files.modified_at IS excluded.modified_at
+                WHEN {same_file_condition}
                 THEN indexed_files.duration_seconds
                 ELSE excluded.duration_seconds
             END,
@@ -611,6 +957,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         if full_refresh:
             connection.execute("DELETE FROM indexed_files WHERE garage = ?", (LOCAL_GARAGE,))
             connection.execute("DELETE FROM camera_inventory WHERE garage = ?", (LOCAL_GARAGE,))
+            connection.execute("DELETE FROM vehicle_camera_day_summary WHERE garage = ?", (LOCAL_GARAGE,))
             connection.commit()
 
         file_batch: List[tuple] = []
@@ -618,6 +965,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         seen_vehicle_targets = set()
         seen_camera_targets = set()
         seen_day_targets = set()
+        seen_capture_dates = set()
 
         for vehicle_entry in safe_scandir(IMAGE_ROOT):
             if not vehicle_entry.is_dir(follow_symlinks=True):
@@ -674,6 +1022,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
                     if day_real in seen_day_targets:
                         continue
                     seen_day_targets.add(day_real)
+                    seen_capture_dates.add(day_entry.name)
 
                     relative_dir = f"{vehicle_name}/{camera_name}/{day_entry.name}"
 
@@ -738,6 +1087,22 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
             "DELETE FROM camera_inventory WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
             (LOCAL_GARAGE, scan_id),
         ).rowcount
+        if seen_capture_dates:
+            placeholders = ", ".join("?" for _ in seen_capture_dates)
+            connection.execute(
+                f"""
+                DELETE FROM vehicle_camera_day_summary
+                WHERE garage = ?
+                  AND capture_date NOT IN ({placeholders})
+                """,
+                [LOCAL_GARAGE, *sorted(seen_capture_dates)],
+            )
+            rebuild_summary_for_dates(connection, LOCAL_GARAGE, seen_capture_dates)
+        else:
+            connection.execute(
+                "DELETE FROM vehicle_camera_day_summary WHERE garage = ?",
+                (LOCAL_GARAGE,),
+            )
 
         set_metadata(connection, "last_scan_started_at", started_at)
         set_metadata(connection, "last_scan_finished_at", iso_now())
@@ -750,6 +1115,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         set_metadata(connection, "image_root", str(IMAGE_ROOT))
         set_metadata(connection, "last_scan_error", "")
         connection.commit()
+        invalidate_dashboard_cache()
 
     return {
         "status": "ok",
@@ -1021,6 +1387,9 @@ def run_periodic_duration_scheduler() -> None:
 
 def start_background_schedulers() -> None:
     with SCHEDULER_LOCK:
+        if "summary_bootstrap" not in SCHEDULERS_STARTED:
+            threading.Thread(target=bootstrap_summary_if_needed, daemon=True).start()
+            SCHEDULERS_STARTED.add("summary_bootstrap")
         if "scan" not in SCHEDULERS_STARTED:
             threading.Thread(target=run_periodic_scan_scheduler, daemon=True).start()
             SCHEDULERS_STARTED.add("scan")
@@ -1181,6 +1550,11 @@ def upsert_remote_export(payload: dict, expected_garage: str, sync_id: str, prun
     end_date = payload.get("to")
     imported_files = 0
     imported_cameras = 0
+    affected_dates = {
+        str(row.get("capture_date"))
+        for row in files
+        if row.get("capture_date")
+    }
 
     with open_db() as connection:
         camera_batch = []
@@ -1255,7 +1629,12 @@ def upsert_remote_export(payload: dict, expected_garage: str, sync_id: str, prun
                 """,
                 (expected_garage, sync_id),
             ).rowcount
+        if prune and start_date and end_date:
+            rebuild_summary_for_range(connection, expected_garage, start_date, end_date)
+        else:
+            rebuild_summary_for_dates(connection, expected_garage, affected_dates)
         connection.commit()
+        invalidate_dashboard_cache()
 
     return {
         "garage": expected_garage,
@@ -1286,7 +1665,9 @@ def prune_remote_sync(garage: str, sync_id: str, start_date: str, end_date: str)
             """,
             (garage, sync_id),
         ).rowcount
+        rebuild_summary_for_range(connection, garage, start_date, end_date)
         connection.commit()
+        invalidate_dashboard_cache()
     return {"deleted_files": deleted_files, "deleted_cameras": deleted_cameras}
 
 
@@ -1534,9 +1915,15 @@ def build_remote_status() -> dict:
 def build_db_status() -> dict:
     started = time.perf_counter()
     with open_db(timeout_seconds=DB_STATUS_TIMEOUT_SECONDS) as connection:
-        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
-        database_list = [dict(row) for row in connection.execute("PRAGMA database_list").fetchall()]
+        if is_postgres():
+            database_row = connection.execute("SELECT current_database() AS database, current_schema() AS schema").fetchone()
+            journal_mode = "postgres"
+            busy_timeout = None
+            database_list = [dict(database_row)] if database_row else []
+        else:
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            database_list = [dict(row) for row in connection.execute("PRAGMA database_list").fetchall()]
         file_counts = [
             dict(row)
             for row in connection.execute(
@@ -1562,7 +1949,9 @@ def build_db_status() -> dict:
     return {
         "status": "ok",
         "generated_at": iso_now(),
-        "database": str(DB_PATH),
+        "engine": "postgres" if is_postgres() else "sqlite",
+        "database": "postgres" if is_postgres() else str(DB_PATH),
+        "postgres_dsn_configured": bool(POSTGRES_DSN) if is_postgres() else False,
         "journal_mode": journal_mode,
         "busy_timeout_ms": busy_timeout,
         "database_list": database_list,
@@ -1572,7 +1961,7 @@ def build_db_status() -> dict:
     }
 
 
-def build_dashboard(query: Dict[str, List[str]]) -> dict:
+def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
     ensure_database()
     month, year = parse_month_year(query)
     month_start = f"{year:04d}-{month:02d}-01"
@@ -1603,23 +1992,45 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
     metadata = get_metadata()
 
     with open_db() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT
-                garage,
-                vehicle,
-                camera,
-                capture_date,
-                COUNT(*) AS total,
-                COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
-                MAX(file_name) AS latest_file
-            FROM indexed_files
-            WHERE {where_sql}
-            GROUP BY garage, vehicle, camera, capture_date
-            ORDER BY vehicle, camera, capture_date, garage
-            """,
-            params,
-        ).fetchall()
+        use_summary = summary_has_rows(connection)
+        rows = []
+        if use_summary:
+            rows = connection.execute(
+                f"""
+                SELECT
+                    garage,
+                    vehicle,
+                    camera,
+                    capture_date,
+                    total_files AS total,
+                    total_size_bytes,
+                    latest_file
+                FROM vehicle_camera_day_summary
+                WHERE {where_sql}
+                ORDER BY vehicle, camera, capture_date, garage
+                """,
+                params,
+            ).fetchall()
+
+        if not rows:
+            use_summary = False
+            rows = connection.execute(
+                f"""
+                SELECT
+                    garage,
+                    vehicle,
+                    camera,
+                    capture_date,
+                    COUNT(*) AS total,
+                    COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
+                    MAX(file_name) AS latest_file
+                FROM indexed_files
+                WHERE {where_sql}
+                GROUP BY garage, vehicle, camera, capture_date
+                ORDER BY vehicle, camera, capture_date, garage
+                """,
+                params,
+            ).fetchall()
 
         inventory_clauses = ["1 = 1"]
         inventory_params: List[str] = []
@@ -1657,7 +2068,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             inventory_rows = connection.execute(
                 f"""
                 SELECT DISTINCT vehicle, camera
-                FROM indexed_files
+                FROM {'vehicle_camera_day_summary' if use_summary else 'indexed_files'}
                 WHERE {where_sql}
                 ORDER BY vehicle, camera
                 """,
@@ -1678,7 +2089,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         last_capture_rows = connection.execute(
             f"""
             SELECT vehicle, MAX(capture_date) AS last_capture_date
-            FROM indexed_files
+            FROM {'vehicle_camera_day_summary' if use_summary else 'indexed_files'}
             WHERE {" AND ".join(last_capture_clauses)}
             GROUP BY vehicle
             """,
@@ -1700,23 +2111,14 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             fleet_row = connection.execute(
                 f"""
                 SELECT COUNT(DISTINCT vehicle) AS total_fleet
-                FROM indexed_files
+                FROM {'vehicle_camera_day_summary' if use_summary else 'indexed_files'}
                 WHERE {where_sql}
                 """,
                 params,
             ).fetchone()
             fleet_total = fleet_row["total_fleet"] if fleet_row else 0
 
-        extension_rows = connection.execute(
-            f"""
-            SELECT extension, COUNT(*) AS total
-            FROM indexed_files
-            WHERE {where_sql}
-            GROUP BY extension
-            ORDER BY total DESC, extension ASC
-            """,
-            params,
-        ).fetchall()
+        extension_rows = []
 
         vehicles = connection.execute(
             f"""
@@ -1733,7 +2135,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             vehicles = connection.execute(
                 f"""
                 SELECT DISTINCT vehicle
-                FROM indexed_files
+                FROM {'vehicle_camera_day_summary' if use_summary else 'indexed_files'}
                 WHERE {" AND ".join(["1 = 1"] + (
                     [f"garage IN ({', '.join('?' for _ in garage_filters)})"] if garage_filters else []
                 ))}
@@ -1763,7 +2165,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             cameras = connection.execute(
                 f"""
                 SELECT DISTINCT camera
-                FROM indexed_files
+                FROM {'vehicle_camera_day_summary' if use_summary else 'indexed_files'}
                 WHERE {" AND ".join(available_camera_clauses)}
                 ORDER BY camera
                 """,
@@ -2033,6 +2435,64 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
     }
 
 
+def build_dashboard(query: Dict[str, List[str]]) -> dict:
+    if query.get("_live", ["0"])[0] == "1":
+        return build_dashboard_payload(query)
+    if DASHBOARD_CACHE_SECONDS <= 0:
+        return build_dashboard_payload(query)
+
+    cache_key = dashboard_cache_key(query)
+    now = time.time()
+    with DASHBOARD_CACHE_LOCK:
+        cached = DASHBOARD_CACHE.get(cache_key)
+        if cached and now - cached[0] < DASHBOARD_CACHE_SECONDS:
+            return cached[1]
+
+    with DASHBOARD_BUILD_LOCK:
+        now = time.time()
+        with DASHBOARD_CACHE_LOCK:
+            cached = DASHBOARD_CACHE.get(cache_key)
+            if cached and now - cached[0] < DASHBOARD_CACHE_SECONDS:
+                return cached[1]
+        payload = build_dashboard_payload(query)
+        with DASHBOARD_CACHE_LOCK:
+            DASHBOARD_CACHE[cache_key] = (time.time(), payload)
+    return payload
+
+
+def dashboard_section(query: Dict[str, List[str]], section: str) -> dict:
+    dashboard = build_dashboard(query)
+    payload = {
+        "status": "ok",
+        "generated_at": dashboard["generated_at"],
+        "filters": dashboard["filters"],
+    }
+    if section == "summary":
+        payload["summary"] = dashboard["summary"]
+        payload["garage_status"] = dashboard["garage_status"]
+        payload["scan_info"] = dashboard["scan_info"]
+    elif section == "daily-overview":
+        payload["dates"] = dashboard["dates"]
+        payload["daily_overview"] = dashboard["daily_overview"]
+    elif section == "top-cameras":
+        payload["top_rows"] = dashboard["top_rows"]
+    elif section == "matrix":
+        payload["dates"] = dashboard["dates"]
+        payload["rows"] = dashboard["rows"]
+        payload["fleet_total"] = dashboard["summary"]["fleet_total"]
+    elif section == "filters":
+        payload["available_filters"] = dashboard["available_filters"]
+    elif section == "garage-status":
+        payload = {
+            "status": "ok",
+            "generated_at": iso_now(),
+            "garage_status": build_remote_status()["garages"],
+        }
+    else:
+        raise ValueError(f"Secao desconhecida: {section}")
+    return payload
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
@@ -2040,13 +2500,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/":
                 return self.serve_file(TEMPLATE_DIR / "index.html", "text/html; charset=utf-8")
-            if parsed.path == "/config":
+            if parsed.path in {"/config", "/config/"}:
                 return self.serve_file(TEMPLATE_DIR / "config.html", "text/html; charset=utf-8")
             if parsed.path == "/api/config":
                 return self.serve_json(build_config_payload())
             if parsed.path == "/api/dashboard":
                 query = parse_qs(parsed.query)
                 return self.serve_json(build_dashboard(query))
+            if parsed.path in {
+                "/api/summary",
+                "/api/daily-overview",
+                "/api/top-cameras",
+                "/api/matrix",
+                "/api/filters",
+                "/api/garage-status",
+            }:
+                query = parse_qs(parsed.query)
+                section = parsed.path.removeprefix("/api/")
+                return self.serve_json(dashboard_section(query, section))
             if parsed.path == "/api/rescan":
                 query = parse_qs(parsed.query)
                 full_refresh = query.get("full", ["0"])[0] == "1"
@@ -2103,8 +2574,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "generated_at": iso_now(),
                         "root": str(IMAGE_ROOT),
                         "root_exists": IMAGE_ROOT.exists(),
-                        "database": str(DB_PATH),
-                        "database_exists": DB_PATH.exists(),
+                        "database_engine": "postgres" if is_postgres() else "sqlite",
+                        "database": "postgres" if is_postgres() else str(DB_PATH),
+                        "database_exists": True if is_postgres() else DB_PATH.exists(),
                         "scan": get_scan_status(),
                         "duration": get_duration_status(),
                     }
@@ -2210,7 +2682,10 @@ def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), DashboardHandler)
     print(f"Dashboard disponível em http://{HOST}:{PORT}")
     print(f"Lendo imagens em: {IMAGE_ROOT}")
-    print(f"Banco SQLite em: {DB_PATH}")
+    if is_postgres():
+        print("Banco PostgreSQL configurado.")
+    else:
+        print(f"Banco SQLite em: {DB_PATH}")
     server.serve_forever()
 
 

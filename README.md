@@ -1,6 +1,6 @@
 # Dashboard de Imagens
 
-Aplicação Python sem dependências externas para indexar um diretório de imagens/vídeos em SQLite e exibir um relatório por veículo, câmera e dia.
+Aplicacao Python para indexar um diretorio de imagens/videos e exibir um relatorio por veiculo, camera, garagem e dia. O banco pode ser SQLite ou PostgreSQL.
 
 ## Estrutura Esperada
 
@@ -15,6 +15,12 @@ Aplicação Python sem dependências externas para indexar um diretório de imag
 
 ## Como Executar
 
+Instale as dependencias quando for usar PostgreSQL:
+
+```bash
+pip install -r requirements.txt
+```
+
 No Windows:
 
 ```powershell
@@ -27,7 +33,8 @@ No Linux:
 ```bash
 export IMAGE_DASHBOARD_ROOT=/home/publico/imagens
 export IMAGE_DASHBOARD_GARAGE=G1
-export IMAGE_DASHBOARD_DB=/home/publico/dashboard_imagens.db
+export IMAGE_DASHBOARD_DB_ENGINE=sqlite
+export IMAGE_DASHBOARD_DB=./db/dashboard_imagens.db
 python3 app.py
 ```
 
@@ -47,6 +54,26 @@ http://localhost:8081/config
 
 Veja [.env.example](.env.example) para as variáveis disponíveis.
 
+### PostgreSQL
+
+Crie um banco vazio no PostgreSQL e configure:
+
+```bash
+export IMAGE_DASHBOARD_DB_ENGINE=postgres
+export IMAGE_DASHBOARD_POSTGRES_DSN=postgresql://usuario:senha@127.0.0.1:5432/dashboard_imagens
+python3 app.py
+```
+
+A aplicacao cria as tabelas e indices automaticamente ao iniciar. Para voltar ao SQLite, use `IMAGE_DASHBOARD_DB_ENGINE=sqlite`.
+
+Para migrar os dados atuais do SQLite para o PostgreSQL:
+
+```bash
+export IMAGE_DASHBOARD_DB=./db/dashboard_imagens.db
+export IMAGE_DASHBOARD_POSTGRES_DSN=postgresql://usuario:senha@127.0.0.1:5432/dashboard_imagens
+python3 migrate_sqlite_to_postgres.py
+```
+
 Principais opções:
 
 ```bash
@@ -63,6 +90,8 @@ Use `0` em `IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS` ou `IMAGE_DASHBOARD_DURATION_
 
 - `/` interface web
 - `/api/dashboard` dados JSON do relatório
+- `/api/summary`, `/api/daily-overview`, `/api/top-cameras`, `/api/matrix`, `/api/filters` retornam blocos separados do dashboard
+- `/api/garage-status` retorna somente o status das garagens
 - `/api/rescan` inicia uma indexação incremental em background
 - `/api/rescan?full=1` executa reindexação completa
 - `/api/scan-status` consulta o status da indexação
@@ -110,12 +139,15 @@ export IMAGE_DASHBOARD_REMOTE_FULL_SYNC_INTERVAL_SECONDS=3600
 export IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS=0
 export IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS=60
 export IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE=1000
+export IMAGE_DASHBOARD_CACHE_SECONDS=20
 python3 app.py
 ```
 
 A sincronizacao curta roda a cada 3 minutos e busca os ultimos 30 dias.
 A sincronizacao historica roda a cada 1 hora. Use `IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS=0`
 para buscar todo o historico.
+O dashboard usa agregados por veiculo/camera/dia e cache curto configuravel por
+`IMAGE_DASHBOARD_CACHE_SECONDS`.
 
 Se a sincronização remota ainda der timeout, reduza `IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE`
 para `500`. A G1 busca a G2 em páginas, então valores menores deixam cada resposta mais leve.

@@ -12,7 +12,6 @@ const filtersBar = document.querySelector(".filters-bar");
 const summaryGrid = document.getElementById("summaryGrid");
 const garageStatusGrid = document.getElementById("garageStatusGrid");
 const dailyOverview = document.getElementById("dailyOverview");
-const topRows = document.getElementById("topRows");
 const matrixTable = document.getElementById("matrixTable");
 const statusMessage = document.getElementById("statusMessage");
 const summaryCardTemplate = document.getElementById("summaryCardTemplate");
@@ -25,7 +24,8 @@ const monthNames = [
 let scanPollTimer = null;
 let dashboardRequestId = 0;
 let dashboardRefreshTimer = null;
-const DASHBOARD_REFRESH_INTERVAL_MS = 30000;
+let dashboardLoading = false;
+const DASHBOARD_REFRESH_INTERVAL_MS = 20000;
 
 function updateStickyOffsets() {
   if (!filtersBar) return;
@@ -289,7 +289,7 @@ function currentMatrixDates() {
 }
 
 function setSectionLoading(isLoading) {
-  [summaryGrid, dailyOverview, topRows, matrixTable].forEach((element) => {
+  [summaryGrid, dailyOverview, matrixTable].forEach((element) => {
     if (!element) return;
     element.classList.toggle("is-loading", isLoading);
   });
@@ -320,7 +320,7 @@ function markChangedValues(previousValues) {
 }
 
 function animateSectionUpdate() {
-  [summaryGrid, dailyOverview, topRows, matrixTable].forEach((element) => {
+  [summaryGrid, dailyOverview, matrixTable].forEach((element) => {
     if (!element) return;
     element.classList.remove("data-ready");
     void element.offsetWidth;
@@ -344,17 +344,6 @@ function renderLoadingDaily() {
       <span class="skeleton-line w-60"></span>
       <strong class="skeleton-block small"></strong>
       <small class="skeleton-line w-70"></small>
-    </article>
-  `).join("");
-}
-
-function renderLoadingTopRows() {
-  topRows.innerHTML = Array.from({length: 4}).map(() => `
-    <article class="top-card skeleton-card">
-      <span class="skeleton-line w-70"></span>
-      <strong class="skeleton-block small"></strong>
-      <small class="skeleton-line w-50"></small>
-      <em class="skeleton-line w-90"></em>
     </article>
   `).join("");
 }
@@ -396,7 +385,6 @@ function renderLoadingDashboard() {
   hideStatus();
   renderLoadingSummary();
   renderLoadingDaily();
-  renderLoadingTopRows();
   renderLoadingMatrix();
   setSectionLoading(true);
 }
@@ -571,27 +559,6 @@ function renderDaily(days) {
   });
 }
 
-function renderTopRows(rows) {
-  topRows.innerHTML = "";
-  if (!rows.length) {
-    topRows.innerHTML = '<p class="muted">Sem destaques para o período atual.</p>';
-    return;
-  }
-
-  rows.forEach((row) => {
-    const article = document.createElement("article");
-    article.className = "top-card";
-    const topKey = `top-${row.vehicle}-${row.camera}`;
-    article.innerHTML = `
-      <span>${row.vehicle} / ${row.camera}</span>
-      <strong data-update-key="${topKey}-total">${formatNumber(row.total)}</strong>
-      <small data-update-key="${topKey}-days">${formatNumber(row.active_days)} dias ativos</small>
-      <em>Último: ${formatTimestamp(row.latest_file)}</em>
-    `;
-    topRows.appendChild(article);
-  });
-}
-
 function renderMatrix(dates, rows, fleetTotal = 0) {
   const thead = matrixTable.querySelector("thead");
   const tbody = matrixTable.querySelector("tbody");
@@ -670,6 +637,10 @@ function renderFilterOptions(filters) {
 
 async function loadDashboard(options = {}) {
   const { showLoading = true, animateAll = true, animateChanges = false } = options;
+  if (dashboardLoading && !showLoading) {
+    return;
+  }
+  dashboardLoading = true;
   const requestId = ++dashboardRequestId;
   const previousValues = animateChanges ? snapshotUpdateValues() : null;
   hideStatus();
@@ -678,7 +649,12 @@ async function loadDashboard(options = {}) {
   }
 
   try {
-    const response = await fetch(`/api/dashboard?${buildQuery()}`);
+    const query = new URLSearchParams(buildQuery());
+    query.set("_refresh", String(Date.now()));
+    if (animateChanges) {
+      query.set("_live", "1");
+    }
+    const response = await fetch(`/api/dashboard?${query.toString()}`, {cache: "no-store"});
     const data = await response.json();
 
     if (requestId !== dashboardRequestId) {
@@ -693,7 +669,6 @@ async function loadDashboard(options = {}) {
     renderSummary(data.summary);
     renderGarageStatus(data.garage_status);
     renderDaily(data.daily_overview);
-    renderTopRows(data.top_rows);
     renderMatrix(data.dates, data.rows, data.summary.fleet_total);
     setSectionLoading(false);
     if (animateChanges && previousValues) {
@@ -717,9 +692,12 @@ async function loadDashboard(options = {}) {
     summaryGrid.innerHTML = '<p class="muted">Não foi possível carregar o relatório.</p>';
     garageStatusGrid.innerHTML = "";
     dailyOverview.innerHTML = "";
-    topRows.innerHTML = "";
     matrixTable.querySelector("thead").innerHTML = "";
     matrixTable.querySelector("tbody").innerHTML = "";
+  } finally {
+    if (requestId === dashboardRequestId) {
+      dashboardLoading = false;
+    }
   }
 }
 
@@ -736,6 +714,11 @@ function stopDashboardAutoRefresh() {
   window.clearInterval(dashboardRefreshTimer);
   dashboardRefreshTimer = null;
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  loadDashboard({ showLoading: false, animateAll: false, animateChanges: true });
+});
 
 function resetFilters() {
   clearSelection(garageSelect);
