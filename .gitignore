@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 
 .env
+dashboard_config.json
 .venv/
 venv/
 env/

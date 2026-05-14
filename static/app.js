@@ -1,13 +1,16 @@
 const monthSelect = document.getElementById("month");
 const yearSelect = document.getElementById("year");
+const garageSelect = document.getElementById("garage");
 const vehicleSelect = document.getElementById("vehicle");
 const cameraSelect = document.getElementById("camera");
+const garagePicker = document.getElementById("garagePicker");
 const vehiclePicker = document.getElementById("vehiclePicker");
 const cameraPicker = document.getElementById("cameraPicker");
 const resetButton = document.getElementById("resetFilters");
 const filtersBar = document.querySelector(".filters-bar");
 
 const summaryGrid = document.getElementById("summaryGrid");
+const garageStatusGrid = document.getElementById("garageStatusGrid");
 const dailyOverview = document.getElementById("dailyOverview");
 const topRows = document.getElementById("topRows");
 const matrixTable = document.getElementById("matrixTable");
@@ -33,7 +36,7 @@ function createMultiPicker(root, select, placeholder) {
   root.innerHTML = `
     <button class="multi-picker-button" type="button" aria-expanded="false">
       <span>${placeholder}</span>
-      <b>▾</b>
+      <b>v</b>
     </button>
     <div class="multi-picker-menu" hidden>
       <input class="multi-picker-search" type="search" placeholder="Pesquisar...">
@@ -81,7 +84,7 @@ function createMultiPicker(root, select, placeholder) {
       item.className = "multi-picker-option";
       item.setAttribute("aria-pressed", selected.has(option.value) ? "true" : "false");
       item.innerHTML = `
-        <span class="multi-picker-check">${selected.has(option.value) ? "✓" : ""}</span>
+        <span class="multi-picker-check">${selected.has(option.value) ? "x" : ""}</span>
         <span>${option.value}</span>
       `;
       item.addEventListener("click", (event) => {
@@ -123,7 +126,7 @@ function createMultiPicker(root, select, placeholder) {
       return;
     }
 
-    if (menu.hidden) open();
+    open();
   });
   search.addEventListener("input", renderOptions);
 
@@ -140,10 +143,12 @@ function createMultiPicker(root, select, placeholder) {
   return { renderOptions, updateButton, close, isOpen, reopen };
 }
 
+const garagePickerApi = createMultiPicker(garagePicker, garageSelect, "Todas as garagens");
 const vehiclePickerApi = createMultiPicker(vehiclePicker, vehicleSelect, "Todos os veículos");
 const cameraPickerApi = createMultiPicker(cameraPicker, cameraSelect, "Todas as câmeras");
 
 document.addEventListener("click", (event) => {
+  if (!garagePicker.contains(event.target)) garagePickerApi.close();
   if (!vehiclePicker.contains(event.target)) vehiclePickerApi.close();
   if (!cameraPicker.contains(event.target)) cameraPickerApi.close();
 });
@@ -207,6 +212,8 @@ function populateMultiSelect(select, values) {
 }
 
 function syncPickers() {
+  garagePickerApi.updateButton();
+  garagePickerApi.renderOptions();
   vehiclePickerApi.updateButton();
   vehiclePickerApi.renderOptions();
   cameraPickerApi.updateButton();
@@ -236,6 +243,7 @@ function buildQuery() {
   const params = new URLSearchParams();
   params.set("month", monthSelect.value);
   params.set("year", yearSelect.value);
+  selectedValues(garageSelect).forEach((garage) => params.append("garage", garage));
   selectedValues(vehicleSelect).forEach((vehicle) => params.append("vehicle", vehicle));
   selectedValues(cameraSelect).forEach((camera) => params.append("camera", camera));
   return params.toString();
@@ -271,6 +279,40 @@ function renderSummary(summary) {
     }
   });
   summaryGrid.appendChild(node);
+}
+
+function renderGarageStatus(statuses) {
+  if (!garageStatusGrid) return;
+  garageStatusGrid.innerHTML = "";
+
+  (statuses || []).forEach((garage) => {
+    const labelByStatus = {
+      online: "Online",
+      offline: "Offline",
+    };
+    const statusLabel = labelByStatus[garage.status] || garage.status || "Offline";
+    const syncDetail = garage.syncing
+      ? `Sincronizando: etapa ${garage.step || "-"}${garage.imported_files ? `, ${garage.imported_files.toLocaleString("pt-BR")} arquivos` : ""}`
+      : "";
+    const article = document.createElement("article");
+    article.className = `garage-status-card ${garage.status || "offline"}${garage.syncing ? " syncing" : ""}`;
+    if (garage.error) {
+      article.title = garage.error;
+    } else if (syncDetail) {
+      article.title = syncDetail;
+    }
+    article.innerHTML = `
+      <span>${garage.name}</span>
+      <strong>${statusLabel}</strong>
+      ${garage.syncing ? `
+        <span class="sync-tooltip">
+          <i class="mini-loader" aria-hidden="true"></i>
+          ${syncDetail}
+        </span>
+      ` : ""}
+    `;
+    garageStatusGrid.appendChild(article);
+  });
 }
 
 async function fetchScanStatus() {
@@ -380,12 +422,19 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
       const day = entry.days[date];
       if (!day) return '<td class="cell-none">0</td>';
 
+      const garageNames = day.garage_names || [];
+      const garageLabel = garageNames.join(" / ");
+      const garageBadge = garageLabel
+        ? `<span class="garage-badge">${garageLabel}</span>`
+        : "";
+
       const cameraDetails = day.cameras
         .map((camera) => `<span class="camera-chip">${camera.name}: ${formatNumber(camera.count)}</span>`)
         .join("");
 
       return `
         <td class="cell-${day.level}">
+          ${garageBadge}
           <div class="day-total">${formatNumber(day.count)}</div>
           <div class="camera-stack">${cameraDetails}</div>
         </td>
@@ -409,11 +458,14 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
 
 function renderFilterOptions(filters) {
   if (!filters) return;
+  const keepGarageOpen = garagePickerApi.isOpen();
   const keepVehicleOpen = vehiclePickerApi.isOpen();
   const keepCameraOpen = cameraPickerApi.isOpen();
+  populateMultiSelect(garageSelect, filters.garages);
   populateMultiSelect(vehicleSelect, filters.vehicles);
   populateMultiSelect(cameraSelect, filters.cameras);
   syncPickers();
+  if (keepGarageOpen) garagePickerApi.reopen();
   if (keepVehicleOpen) vehiclePickerApi.reopen();
   if (keepCameraOpen) cameraPickerApi.reopen();
 }
@@ -431,6 +483,7 @@ async function loadDashboard() {
 
     renderFilterOptions(data.available_filters);
     renderSummary(data.summary);
+    renderGarageStatus(data.garage_status);
     renderDaily(data.daily_overview);
     renderTopRows(data.top_rows);
     renderMatrix(data.dates, data.rows, data.summary.fleet_total);
@@ -441,6 +494,7 @@ async function loadDashboard() {
   } catch (error) {
     showStatus(`Falha ao carregar dados: ${error.message}`);
     summaryGrid.innerHTML = '<p class="muted">Não foi possível carregar o relatório.</p>';
+    garageStatusGrid.innerHTML = "";
     dailyOverview.innerHTML = "";
     topRows.innerHTML = "";
     matrixTable.querySelector("thead").innerHTML = "";
@@ -449,6 +503,7 @@ async function loadDashboard() {
 }
 
 function resetFilters() {
+  clearSelection(garageSelect);
   clearSelection(vehicleSelect);
   clearSelection(cameraSelect);
   syncPickers();
@@ -460,8 +515,6 @@ function resetFilters() {
 
 monthSelect.addEventListener("change", loadDashboard);
 yearSelect.addEventListener("change", loadDashboard);
-vehicleSelect.addEventListener("change", loadDashboard);
-cameraSelect.addEventListener("change", loadDashboard);
 resetButton.addEventListener("click", resetFilters);
 
 window.addEventListener("beforeunload", () => {
