@@ -465,8 +465,9 @@ function renderGarageStatus(statuses) {
       offline: "Offline",
     };
     const statusLabel = labelByStatus[garage.status] || garage.status || "Offline";
+    const syncMode = garage.mode === "historico" ? "historico" : "recente";
     const syncDetail = garage.syncing
-      ? `Sincronizando: etapa ${garage.step || "-"}${garage.imported_files ? `, ${garage.imported_files.toLocaleString("pt-BR")} arquivos` : ""}`
+      ? `Sincronizando ${syncMode}: etapa ${garage.step || "-"}${garage.imported_files ? `, ${garage.imported_files.toLocaleString("pt-BR")} arquivos` : ""}`
       : "";
     const lastConnection = formatConnectionTimestamp(garage.last_online_at);
     const offlineDetail = garage.status === "offline"

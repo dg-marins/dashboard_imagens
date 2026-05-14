@@ -105,10 +105,17 @@ export IMAGE_DASHBOARD_GARAGE=G1
 export IMAGE_DASHBOARD_REMOTE_GARAGES=G2:http://10.90.0.22:8081
 export IMAGE_DASHBOARD_REMOTE_HEALTH_INTERVAL_SECONDS=120
 export IMAGE_DASHBOARD_REMOTE_SYNC_INTERVAL_SECONDS=180
+export IMAGE_DASHBOARD_REMOTE_SYNC_DAYS=30
+export IMAGE_DASHBOARD_REMOTE_FULL_SYNC_INTERVAL_SECONDS=3600
+export IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS=0
 export IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS=60
 export IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE=1000
 python3 app.py
 ```
+
+A sincronizacao curta roda a cada 3 minutos e busca os ultimos 30 dias.
+A sincronizacao historica roda a cada 1 hora. Use `IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS=0`
+para buscar todo o historico.
 
 Se a sincronização remota ainda der timeout, reduza `IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE`
 para `500`. A G1 busca a G2 em páginas, então valores menores deixam cada resposta mais leve.

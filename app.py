@@ -37,6 +37,8 @@ from config import (
     LOCAL_GARAGE,
     PORT,
     REMOTE_EXPORT_BATCH_SIZE,
+    REMOTE_FULL_SYNC_DAYS,
+    REMOTE_FULL_SYNC_INTERVAL_SECONDS,
     REMOTE_GARAGES,
     REMOTE_HEALTH_INTERVAL_SECONDS,
     REMOTE_REQUEST_TIMEOUT_SECONDS,
@@ -95,6 +97,8 @@ REMOTE_SYNC_STATE = {
     "finished_at": None,
     "current_garage": None,
     "current_step": None,
+    "mode": None,
+    "sync_days": None,
     "pages": 0,
     "imported_files": 0,
     "imported_cameras": 0,
@@ -124,8 +128,10 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "global": "FFPROBE_TIMEOUT_SECONDS", "type": "int", "group": "Videos", "label": "Timeout ffprobe (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_REMOTE_GARAGES", "global": "REMOTE_GARAGES", "type": "str", "group": "Garagens remotas", "label": "Garagens remotas", "live": True},
     {"name": "IMAGE_DASHBOARD_REMOTE_HEALTH_INTERVAL_SECONDS", "global": "REMOTE_HEALTH_INTERVAL_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Intervalo healthcheck (s)", "live": True},
-    {"name": "IMAGE_DASHBOARD_REMOTE_SYNC_INTERVAL_SECONDS", "global": "REMOTE_SYNC_INTERVAL_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Intervalo sync (s)", "live": True},
-    {"name": "IMAGE_DASHBOARD_REMOTE_SYNC_DAYS", "global": "REMOTE_SYNC_DAYS", "type": "int", "group": "Garagens remotas", "label": "Dias sincronizados", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_SYNC_INTERVAL_SECONDS", "global": "REMOTE_SYNC_INTERVAL_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Intervalo sync recente (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_SYNC_DAYS", "global": "REMOTE_SYNC_DAYS", "type": "int", "group": "Garagens remotas", "label": "Dias da sync recente", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_FULL_SYNC_INTERVAL_SECONDS", "global": "REMOTE_FULL_SYNC_INTERVAL_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Intervalo sync historico (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS", "global": "REMOTE_FULL_SYNC_DAYS", "type": "int", "group": "Garagens remotas", "label": "Dias da sync historica", "live": True},
     {"name": "IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS", "global": "REMOTE_REQUEST_TIMEOUT_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Timeout remoto (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE", "global": "REMOTE_EXPORT_BATCH_SIZE", "type": "int", "group": "Garagens remotas", "label": "Lote export remoto", "live": True},
     {"name": "IMAGE_DASHBOARD_DATE_DIR_REGEX", "global": "DATE_DIR_REGEX", "type": "str", "group": "Padroes", "label": "Regex pasta de data", "live": True},
@@ -1027,6 +1033,9 @@ def start_background_schedulers() -> None:
         if parse_remote_garages() and "remote_sync" not in SCHEDULERS_STARTED:
             threading.Thread(target=run_remote_sync_scheduler, daemon=True).start()
             SCHEDULERS_STARTED.add("remote_sync")
+        if parse_remote_garages() and "remote_full_sync" not in SCHEDULERS_STARTED:
+            threading.Thread(target=run_remote_full_sync_scheduler, daemon=True).start()
+            SCHEDULERS_STARTED.add("remote_full_sync")
 
 
 def parse_export_range(query: Dict[str, List[str]]) -> Tuple[str, str]:
@@ -1281,16 +1290,22 @@ def prune_remote_sync(garage: str, sync_id: str, start_date: str, end_date: str)
     return {"deleted_files": deleted_files, "deleted_cameras": deleted_cameras}
 
 
-def sync_remote_garage(garage: str, base_url: str) -> dict:
-    sync_id = f"remote-{garage}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+def get_remote_sync_range(sync_days: int) -> Tuple[str, str]:
     today = date.today()
-    start_date = (today - timedelta(days=REMOTE_SYNC_DAYS)).isoformat()
     end_date = (today + timedelta(days=1)).isoformat()
+    if sync_days <= 0:
+        return "0001-01-01", end_date
+    return (today - timedelta(days=sync_days)).isoformat(), end_date
+
+
+def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) -> dict:
+    sync_id = f"remote-{garage}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    start_date, end_date = get_remote_sync_range(sync_days)
     imported_files = 0
     imported_cameras = 0
     pages = 0
     try:
-        update_remote_sync_state(current_garage=garage, current_step="healthcheck")
+        update_remote_sync_state(current_garage=garage, current_step="healthcheck", mode=mode, sync_days=sync_days)
         health = fetch_remote_json(base_url, "/api/garage-health")
         if health.get("status") != "ok":
             raise RuntimeError(f"Health remoto inválido: {health}")
@@ -1299,7 +1314,7 @@ def sync_remote_garage(garage: str, base_url: str) -> dict:
         after_date = ""
         after_id = 0
         while True:
-            update_remote_sync_state(current_garage=garage, current_step="export", pages=pages)
+            update_remote_sync_state(current_garage=garage, current_step="export", pages=pages, mode=mode, sync_days=sync_days)
             export_query = {
                 "from": start_date,
                 "to": end_date,
@@ -1312,7 +1327,7 @@ def sync_remote_garage(garage: str, base_url: str) -> dict:
             else:
                 export_query["offset"] = str(offset)
             payload = fetch_remote_json(base_url, "/api/export", export_query)
-            update_remote_sync_state(current_garage=garage, current_step="import")
+            update_remote_sync_state(current_garage=garage, current_step="import", mode=mode, sync_days=sync_days)
             result = upsert_remote_export(payload, garage, sync_id, prune=False)
             imported_files += result["imported_files"]
             imported_cameras += result["imported_cameras"]
@@ -1329,12 +1344,16 @@ def sync_remote_garage(garage: str, base_url: str) -> dict:
             after_id = int(payload.get("next_after_id") or 0)
             if not after_date or not after_id:
                 offset = int(payload.get("next_offset") or (offset + REMOTE_EXPORT_BATCH_SIZE))
-        update_remote_sync_state(current_garage=garage, current_step="prune")
+        update_remote_sync_state(current_garage=garage, current_step="prune", mode=mode, sync_days=sync_days)
         prune_result = prune_remote_sync(garage, sync_id, start_date, end_date)
         update_remote_garage_state(garage, "online")
         return {
             "status": "ok",
             "garage": garage,
+            "mode": mode,
+            "sync_days": sync_days,
+            "from": start_date,
+            "to": end_date,
             "imported_files": imported_files,
             "imported_cameras": imported_cameras,
             "pages": pages,
@@ -1342,12 +1361,12 @@ def sync_remote_garage(garage: str, base_url: str) -> dict:
         }
     except Exception as exc:
         update_remote_garage_state(garage, "offline", str(exc))
-        return {"status": "error", "garage": garage, "error": str(exc)}
+        return {"status": "error", "garage": garage, "mode": mode, "sync_days": sync_days, "error": str(exc)}
 
 
-def sync_remote_garages_once() -> List[dict]:
+def sync_remote_garages_once(sync_days: int = REMOTE_SYNC_DAYS, mode: str = "recent") -> List[dict]:
     return [
-        sync_remote_garage(garage, base_url)
+        sync_remote_garage(garage, base_url, sync_days, mode)
         for garage, base_url in parse_remote_garages().items()
     ]
 
@@ -1371,7 +1390,7 @@ def check_remote_garages_health_once() -> List[dict]:
     ]
 
 
-def run_remote_sync_job() -> dict:
+def run_remote_sync_job(sync_days: int = REMOTE_SYNC_DAYS, mode: str = "recent") -> dict:
     if not REMOTE_SYNC_LOCK.acquire(blocking=False):
         return {"status": "busy", "message": "Sincronizacao remota ja esta em andamento.", "sync": get_remote_sync_state()}
 
@@ -1382,6 +1401,8 @@ def run_remote_sync_job() -> dict:
         finished_at=None,
         current_garage=None,
         current_step="starting",
+        mode=mode,
+        sync_days=sync_days,
         pages=0,
         imported_files=0,
         imported_cameras=0,
@@ -1389,7 +1410,7 @@ def run_remote_sync_job() -> dict:
         results=[],
     )
     try:
-        results = sync_remote_garages_once()
+        results = sync_remote_garages_once(sync_days=sync_days, mode=mode)
         error = next((result.get("error") for result in results if result.get("status") == "error"), None)
         update_remote_sync_state(
             running=False,
@@ -1399,7 +1420,7 @@ def run_remote_sync_job() -> dict:
             error=error,
             results=results,
         )
-        return {"status": "ok", "started_at": started_at, "finished_at": get_remote_sync_state().get("finished_at"), "results": results}
+        return {"status": "ok", "mode": mode, "sync_days": sync_days, "started_at": started_at, "finished_at": get_remote_sync_state().get("finished_at"), "results": results}
     except Exception as exc:
         update_remote_sync_state(
             running=False,
@@ -1412,10 +1433,10 @@ def run_remote_sync_job() -> dict:
         REMOTE_SYNC_LOCK.release()
 
 
-def start_remote_sync_job() -> dict:
+def start_remote_sync_job(sync_days: int = REMOTE_SYNC_DAYS, mode: str = "recent") -> dict:
     if get_remote_sync_state().get("running"):
         return {"status": "busy", "message": "Sincronizacao remota ja esta em andamento.", "sync": get_remote_sync_state()}
-    thread = threading.Thread(target=run_remote_sync_job, daemon=True)
+    thread = threading.Thread(target=run_remote_sync_job, kwargs={"sync_days": sync_days, "mode": mode}, daemon=True)
     thread.start()
     return {"status": "started", "message": "Sincronizacao remota iniciada em background.", "sync": get_remote_sync_state()}
 
@@ -1425,8 +1446,18 @@ def run_remote_sync_scheduler() -> None:
         if REMOTE_SYNC_INTERVAL_SECONDS <= 0 or not parse_remote_garages():
             time.sleep(1)
             continue
-        run_remote_sync_job()
+        run_remote_sync_job(sync_days=REMOTE_SYNC_DAYS, mode="recent")
         time.sleep(max(1, REMOTE_SYNC_INTERVAL_SECONDS))
+
+
+def run_remote_full_sync_scheduler() -> None:
+    time.sleep(max(1, REMOTE_FULL_SYNC_INTERVAL_SECONDS))
+    while True:
+        if REMOTE_FULL_SYNC_INTERVAL_SECONDS <= 0 or not parse_remote_garages():
+            time.sleep(1)
+            continue
+        run_remote_sync_job(sync_days=REMOTE_FULL_SYNC_DAYS, mode="historico")
+        time.sleep(max(1, REMOTE_FULL_SYNC_INTERVAL_SECONDS))
 
 
 def run_remote_health_scheduler() -> None:
@@ -1458,6 +1489,7 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
                     "checked_at": sync_state.get("started_at"),
                     "last_online_at": remote_state.get(garage, {}).get("last_online_at"),
                     "step": sync_state.get("current_step"),
+                    "mode": sync_state.get("mode"),
                     "pages": sync_state.get("pages"),
                     "imported_files": sync_state.get("imported_files"),
                 }
@@ -1490,6 +1522,8 @@ def build_remote_status() -> dict:
         "remote_health_interval_seconds": REMOTE_HEALTH_INTERVAL_SECONDS,
         "remote_sync_interval_seconds": REMOTE_SYNC_INTERVAL_SECONDS,
         "remote_sync_days": REMOTE_SYNC_DAYS,
+        "remote_full_sync_interval_seconds": REMOTE_FULL_SYNC_INTERVAL_SECONDS,
+        "remote_full_sync_days": REMOTE_FULL_SYNC_DAYS,
         "remote_timeout_seconds": REMOTE_REQUEST_TIMEOUT_SECONDS,
         "remote_export_batch_size": REMOTE_EXPORT_BATCH_SIZE,
         "sync": get_remote_sync_state(),
@@ -2038,9 +2072,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self.serve_json(build_export_payload(query))
             if parsed.path == "/api/remote-sync":
                 query = parse_qs(parsed.query)
+                full_sync = query.get("full", ["0"])[0] == "1" or query.get("mode", ["recent"])[0] in {"full", "historico"}
+                sync_days = REMOTE_FULL_SYNC_DAYS if full_sync else REMOTE_SYNC_DAYS
+                sync_mode = "historico" if full_sync else "recent"
                 if query.get("wait", ["0"])[0] == "1":
-                    return self.serve_json(run_remote_sync_job())
-                payload = start_remote_sync_job()
+                    return self.serve_json(run_remote_sync_job(sync_days=sync_days, mode=sync_mode))
+                payload = start_remote_sync_job(sync_days=sync_days, mode=sync_mode)
                 status_code = HTTPStatus.ACCEPTED if payload["status"] == "started" else HTTPStatus.CONFLICT
                 return self.serve_json(
                     {**payload, "generated_at": iso_now()},
