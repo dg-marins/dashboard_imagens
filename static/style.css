@@ -56,7 +56,7 @@ body {
   top: 0;
   z-index: 10;
   display: grid;
-  grid-template-columns: 128px 108px minmax(160px, 220px) minmax(150px, 200px) auto;
+  grid-template-columns: 128px 108px minmax(130px, 170px) minmax(160px, 220px) minmax(150px, 200px) auto minmax(150px, 1fr);
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -264,12 +264,256 @@ button.ghost:hover {
   gap: 10px;
 }
 
+.garage-status-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: end;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.garage-status-card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 10px 24px rgba(35, 50, 44, 0.08);
+}
+
+.garage-status-card span {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.garage-status-card strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.garage-status-card strong::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--danger);
+}
+
+.garage-status-card.online strong::before {
+  background: var(--green);
+}
+
+.garage-status-card.syncing strong::before {
+  background: var(--green);
+}
+
+.sync-tooltip {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: 260px;
+  padding: 8px 10px;
+  color: var(--ink);
+  font-size: 0.76rem;
+  font-weight: 700;
+  line-height: 1.25;
+  text-transform: none;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 12px 30px rgba(35, 50, 44, 0.15);
+}
+
+.garage-status-card.syncing:hover .sync-tooltip,
+.garage-status-card.offline:hover .sync-tooltip {
+  display: inline-flex;
+}
+
+.mini-loader {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border: 2px solid rgba(31, 141, 102, 0.2);
+  border-top-color: var(--green);
+  border-radius: 999px;
+  animation: sync-spin 0.8s linear infinite;
+}
+
+@keyframes sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .summary-card,
 .panel {
   background: rgba(255, 255, 255, 0.94);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+}
+
+.config-shell {
+  max-width: 1180px;
+}
+
+.config-header {
+  align-items: center;
+}
+
+.config-back-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 12px;
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 800;
+  text-decoration: none;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.config-actions {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 12px 35px rgba(38, 57, 67, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.config-actions div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.config-actions strong {
+  color: var(--ink);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+}
+
+.config-actions span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.84rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-actions button {
+  min-height: 38px;
+  padding: 0 14px;
+  color: #fff;
+  font-weight: 800;
+  border: 0;
+  border-radius: 7px;
+  background: var(--ink);
+}
+
+.config-actions button:disabled {
+  opacity: 0.58;
+}
+
+.config-form {
+  display: grid;
+  gap: 14px;
+}
+
+.config-panel {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--shadow);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.config-field {
+  align-content: start;
+}
+
+.config-field textarea {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  padding: 9px 10px;
+  color: var(--text);
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fbfcfb;
+  outline: 0;
+}
+
+.config-field small {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.config-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #fbfcfb;
+}
+
+.config-toggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.config-toggle span {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-transform: none;
+}
+
+.config-status.success {
+  border-color: rgba(77, 138, 95, 0.35);
+}
+
+.config-status.warning {
+  border-color: rgba(196, 154, 63, 0.42);
+}
+
+.config-status.error {
+  border-color: rgba(199, 81, 70, 0.42);
 }
 
 .summary-card {
@@ -338,6 +582,100 @@ button.ghost:hover {
   display: none;
 }
 
+.is-loading {
+  position: relative;
+}
+
+.skeleton-card {
+  pointer-events: none;
+}
+
+.skeleton-line,
+.skeleton-block {
+  display: block;
+  overflow: hidden;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #dde5df 0%, #f2f5f2 44%, #dde5df 88%);
+  background-size: 220% 100%;
+  animation: skeleton-shimmer 1.15s ease-in-out infinite;
+}
+
+.skeleton-line {
+  width: 100%;
+  height: 12px;
+}
+
+.skeleton-line.center {
+  margin-inline: auto;
+}
+
+.skeleton-block {
+  width: 74px;
+  height: 42px;
+  margin-top: 10px;
+  border-radius: 8px;
+}
+
+.skeleton-block.small {
+  width: 66px;
+  height: 30px;
+}
+
+.w-30 { width: 30%; }
+.w-40 { width: 40%; }
+.w-50 { width: 50%; }
+.w-60 { width: 60%; }
+.w-70 { width: 70%; }
+.w-80 { width: 80%; }
+.w-90 { width: 90%; }
+
+.skeleton-cell .skeleton-line + .skeleton-line {
+  margin-top: 7px;
+}
+
+.data-ready {
+  animation: data-ready 0.34s ease-out;
+}
+
+.value-updated {
+  animation: value-soft-update 0.65s ease-out;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+@keyframes data-ready {
+  from {
+    opacity: 0.45;
+    transform: translateY(4px);
+    filter: saturate(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: saturate(1);
+  }
+}
+
+@keyframes value-soft-update {
+  0% {
+    color: #8d6720;
+    text-shadow: 0 8px 18px rgba(196, 154, 63, 0.24);
+    transform: translateY(-2px);
+  }
+  100% {
+    color: inherit;
+    text-shadow: 0 0 0 rgba(196, 154, 63, 0);
+    transform: translateY(0);
+  }
+}
+
 .panel {
   margin-top: 14px;
   padding: 18px;
@@ -403,6 +741,37 @@ button.ghost:hover {
   white-space: nowrap;
 }
 
+.daily-metrics {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+}
+
+.daily-metrics div {
+  display: grid;
+  grid-template-columns: 76px 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.daily-metrics dt,
+.daily-metrics dd {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.2;
+}
+
+.daily-metrics dt {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.daily-metrics dd {
+  color: var(--ink);
+  font-weight: 850;
+  text-align: right;
+}
+
 .day-card strong,
 .top-card strong {
   display: block;
@@ -420,6 +789,10 @@ button.ghost:hover {
   overflow-wrap: anywhere;
   font-size: 0.8rem;
   font-style: normal;
+}
+
+.day-card small span {
+  display: block;
 }
 
 .table-wrap {
@@ -465,7 +838,7 @@ td.sticky {
   position: sticky;
   left: 0;
   z-index: 1;
-  text-align: left;
+  text-align: center;
   background: #fff;
 }
 
@@ -474,8 +847,12 @@ td.sticky-2 {
   position: sticky;
   left: 150px;
   z-index: 1;
-  text-align: left;
+  text-align: center;
   background: #fff;
+}
+
+td.vehicle-column {
+  font-weight: 850;
 }
 
 thead th.sticky,
@@ -506,11 +883,49 @@ thead th.sticky-2 {
   font-weight: 800;
 }
 
+td[class^="cell-"] {
+  position: relative;
+}
+
+.garage-badge-stack {
+  position: absolute;
+  top: 4px;
+  left: 5px;
+  max-width: calc(100% - 10px);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.garage-badge {
+  display: inline-flex;
+  max-width: 44px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(38, 57, 67, 0.14);
+  color: #24363f;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-transform: uppercase;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .camera-stack {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 4px;
-  margin-top: 6px;
+  margin-top: 7px;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  justify-content: center;
+  align-items: center;
 }
 
 .camera-chip {
@@ -527,9 +942,45 @@ thead th.sticky-2 {
   text-overflow: ellipsis;
 }
 
+.camera-total-stack {
+  display: grid;
+  gap: 5px;
+  justify-content: center;
+}
+
+.camera-total-chip {
+  display: grid;
+  grid-template-columns: minmax(58px, max-content) minmax(48px, max-content) minmax(58px, max-content);
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 7px;
+  border-radius: 6px;
+  background: rgba(38, 57, 67, 0.07);
+  color: var(--ink);
+  font-size: 0.72rem;
+  line-height: 1.15;
+}
+
+.camera-total-chip b,
+.camera-total-chip span,
+.camera-total-chip em {
+  font-style: normal;
+  white-space: nowrap;
+}
+
+.camera-total-chip b {
+  text-align: left;
+}
+
+.camera-total-chip span,
+.camera-total-chip em {
+  text-align: right;
+}
+
+
 @media (max-width: 1180px) {
   .filters-bar {
-    grid-template-columns: 120px 100px repeat(2, minmax(150px, 1fr)) auto;
+    grid-template-columns: 120px 100px repeat(3, minmax(145px, 1fr)) auto minmax(150px, 1fr);
   }
 
   .summary-grid,
@@ -563,12 +1014,17 @@ thead th.sticky-2 {
   }
 
   .filter-text,
-  .filters-bar button {
+  .filters-bar button,
+  .garage-status-grid {
     grid-column: span 2;
   }
 
   .filters-bar button {
     width: fit-content;
+  }
+
+  .garage-status-grid {
+    justify-content: flex-start;
   }
 
   .summary-grid,

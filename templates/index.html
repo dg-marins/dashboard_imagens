@@ -24,6 +24,11 @@
         <select id="year"></select>
       </label>
       <label class="filter-text">
+        <span>Garagens</span>
+        <select id="garage" multiple hidden></select>
+        <div id="garagePicker" class="multi-picker"></div>
+      </label>
+      <label class="filter-text">
         <span>Veículo</span>
         <select id="vehicle" multiple hidden></select>
         <div id="vehiclePicker" class="multi-picker"></div>
@@ -34,6 +39,7 @@
         <div id="cameraPicker" class="multi-picker"></div>
       </label>
       <button id="resetFilters" class="ghost" type="button">Limpar filtros</button>
+      <div class="garage-status-grid" id="garageStatusGrid"></div>
     </section>
 
     <section class="summary-grid" id="summaryGrid"></section>

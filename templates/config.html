@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Configuracoes - Relatorio de Cores</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="page-shell config-shell">
+    <header class="page-header config-header">
+      <div>
+        <p class="panel-label">Administracao</p>
+        <h1>Configuracoes</h1>
+      </div>
+      <a class="config-back-link" href="/">Voltar ao relatorio</a>
+    </header>
+
+    <section class="config-actions">
+      <div>
+        <strong>Arquivo local</strong>
+        <span id="configFile">Carregando...</span>
+      </div>
+      <button id="saveConfig" type="button">Salvar configuracoes</button>
+    </section>
+
+    <section id="configStatus" class="status-message hidden"></section>
+    <form id="configForm" class="config-form"></form>
+  </main>
+
+  <script src="/static/config.js"></script>
+</body>
+</html>

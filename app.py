@@ -13,32 +13,52 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import urlopen
 
-
-BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATE_DIR = BASE_DIR / "templates"
-IMAGE_ROOT = Path(os.getenv("IMAGE_DASHBOARD_ROOT", "/home/publico/imagens"))
-DB_PATH = Path(os.getenv("IMAGE_DASHBOARD_DB", str(BASE_DIR / "dashboard_imagens.db")))
-HOST = os.getenv("IMAGE_DASHBOARD_HOST", "0.0.0.0")
-PORT = int(os.getenv("IMAGE_DASHBOARD_PORT", "8081"))
-AUTO_SCAN_ON_START = os.getenv("IMAGE_DASHBOARD_AUTO_SCAN", "1") == "1"
-ENABLE_VIDEO_DURATION = os.getenv("IMAGE_DASHBOARD_ENABLE_DURATION", "1") == "1"
-SCAN_INTERVAL_SECONDS = int(os.getenv("IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS", "300"))
-DURATION_INTERVAL_SECONDS = int(os.getenv("IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "300"))
-INDEX_FILE_BATCH_SIZE = int(os.getenv("IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "5000"))
-INDEX_CAMERA_BATCH_SIZE = int(os.getenv("IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "1000"))
-
-DATE_DIR_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-TIMESTAMP_FILE_PATTERN = re.compile(r"^\d{14}(?:\..+)?$")
-DAY_LEVELS = (
-    (0, "none"),
-    (1, "low"),
-    (25, "medium"),
-    (100, "high"),
+import config
+from config import (
+    ALERT_DAYS_WITHOUT_FILES,
+    AUTO_SCAN_ON_START,
+    CONFIG_FILE,
+    DB_PATH,
+    DB_STATUS_TIMEOUT_SECONDS,
+    DATE_DIR_REGEX,
+    DAY_LEVELS,
+    DURATION_INTERVAL_SECONDS,
+    DURATION_UPDATE_BATCH_SIZE,
+    ENABLE_VIDEO_DURATION,
+    FFPROBE_BINARY,
+    FFPROBE_TIMEOUT_SECONDS,
+    HOST,
+    IMAGE_ROOT,
+    INDEX_CAMERA_BATCH_SIZE,
+    INDEX_FILE_BATCH_SIZE,
+    LOCAL_GARAGE,
+    PORT,
+    REMOTE_EXPORT_BATCH_SIZE,
+    REMOTE_GARAGES,
+    REMOTE_HEALTH_INTERVAL_SECONDS,
+    REMOTE_REQUEST_TIMEOUT_SECONDS,
+    REMOTE_SYNC_DAYS,
+    REMOTE_SYNC_INTERVAL_SECONDS,
+    SCAN_INTERVAL_SECONDS,
+    SCAN_PROGRESS_EVERY_FILES,
+    SQLITE_BUSY_TIMEOUT_MS,
+    SQLITE_CACHE_SIZE,
+    SQLITE_JOURNAL_MODE,
+    SQLITE_SYNCHRONOUS,
+    SQLITE_TEMP_STORE,
+    SQLITE_TIMEOUT_SECONDS,
+    STATIC_DIR,
+    TEMPLATE_DIR,
+    TIMESTAMP_FILE_REGEX,
+    TOP_ROWS_LIMIT,
+    VIDEO_EXTENSIONS,
 )
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".mpeg", ".mpg", ".m4v"}
+
+DATE_DIR_PATTERN = re.compile(DATE_DIR_REGEX)
+TIMESTAMP_FILE_PATTERN = re.compile(TIMESTAMP_FILE_REGEX)
 
 SCAN_LOCK = threading.Lock()
 SCAN_STATE = {
@@ -66,7 +86,61 @@ DURATION_STATE = {
     "pending_files": 0,
     "current_file": None,
 }
+REMOTE_LOCK = threading.Lock()
+REMOTE_GARAGE_STATE: Dict[str, dict] = {}
+REMOTE_SYNC_LOCK = threading.Lock()
+REMOTE_SYNC_STATE = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "current_garage": None,
+    "current_step": None,
+    "pages": 0,
+    "imported_files": 0,
+    "imported_cameras": 0,
+    "error": None,
+    "results": [],
+}
 FFPROBE_AVAILABLE: Optional[bool] = None
+SCHEDULER_LOCK = threading.Lock()
+SCHEDULERS_STARTED = set()
+
+CONFIG_FIELDS = [
+    {"name": "IMAGE_DASHBOARD_ROOT", "global": "IMAGE_ROOT", "type": "path", "group": "Arquivos", "label": "Diretorio de imagens", "live": True},
+    {"name": "IMAGE_DASHBOARD_GARAGE", "global": "LOCAL_GARAGE", "type": "str", "group": "Arquivos", "label": "Garagem local", "live": True},
+    {"name": "IMAGE_DASHBOARD_DB", "global": "DB_PATH", "type": "path", "group": "Arquivos", "label": "Banco SQLite", "live": False},
+    {"name": "IMAGE_DASHBOARD_HOST", "global": "HOST", "type": "str", "group": "Servidor", "label": "Host", "live": False},
+    {"name": "IMAGE_DASHBOARD_PORT", "global": "PORT", "type": "int", "group": "Servidor", "label": "Porta", "live": False},
+    {"name": "IMAGE_DASHBOARD_AUTO_SCAN", "global": "AUTO_SCAN_ON_START", "type": "bool", "group": "Indexacao", "label": "Indexar ao iniciar", "live": True},
+    {"name": "IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS", "global": "SCAN_INTERVAL_SECONDS", "type": "int", "group": "Indexacao", "label": "Intervalo de indexacao (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "global": "INDEX_FILE_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de arquivos", "live": True},
+    {"name": "IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "global": "INDEX_CAMERA_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de cameras", "live": True},
+    {"name": "IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "global": "SCAN_PROGRESS_EVERY_FILES", "type": "int", "group": "Indexacao", "label": "Atualizar progresso a cada N arquivos", "live": True},
+    {"name": "IMAGE_DASHBOARD_ENABLE_DURATION", "global": "ENABLE_VIDEO_DURATION", "type": "bool", "group": "Videos", "label": "Coletar duracao", "live": True},
+    {"name": "IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "global": "DURATION_INTERVAL_SECONDS", "type": "int", "group": "Videos", "label": "Intervalo da fila de duracao (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_DURATION_UPDATE_BATCH_SIZE", "global": "DURATION_UPDATE_BATCH_SIZE", "type": "int", "group": "Videos", "label": "Lote de duracoes", "live": True},
+    {"name": "IMAGE_DASHBOARD_VIDEO_EXTENSIONS", "global": "VIDEO_EXTENSIONS", "type": "csv_set", "group": "Videos", "label": "Extensoes de video", "live": True},
+    {"name": "IMAGE_DASHBOARD_FFPROBE_BINARY", "global": "FFPROBE_BINARY", "type": "str", "group": "Videos", "label": "Binario ffprobe", "live": True},
+    {"name": "IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "global": "FFPROBE_TIMEOUT_SECONDS", "type": "int", "group": "Videos", "label": "Timeout ffprobe (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_GARAGES", "global": "REMOTE_GARAGES", "type": "str", "group": "Garagens remotas", "label": "Garagens remotas", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_HEALTH_INTERVAL_SECONDS", "global": "REMOTE_HEALTH_INTERVAL_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Intervalo healthcheck (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_SYNC_INTERVAL_SECONDS", "global": "REMOTE_SYNC_INTERVAL_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Intervalo sync (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_SYNC_DAYS", "global": "REMOTE_SYNC_DAYS", "type": "int", "group": "Garagens remotas", "label": "Dias sincronizados", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS", "global": "REMOTE_REQUEST_TIMEOUT_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Timeout remoto (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE", "global": "REMOTE_EXPORT_BATCH_SIZE", "type": "int", "group": "Garagens remotas", "label": "Lote export remoto", "live": True},
+    {"name": "IMAGE_DASHBOARD_DATE_DIR_REGEX", "global": "DATE_DIR_REGEX", "type": "str", "group": "Padroes", "label": "Regex pasta de data", "live": True},
+    {"name": "IMAGE_DASHBOARD_TIMESTAMP_FILE_REGEX", "global": "TIMESTAMP_FILE_REGEX", "type": "str", "group": "Padroes", "label": "Regex arquivo", "live": True},
+    {"name": "IMAGE_DASHBOARD_DAY_LEVELS", "global": "DAY_LEVELS", "type": "day_levels", "group": "Relatorio", "label": "Niveis da matriz", "live": True},
+    {"name": "IMAGE_DASHBOARD_ALERT_DAYS_WITHOUT_FILES", "global": "ALERT_DAYS_WITHOUT_FILES", "type": "int", "group": "Relatorio", "label": "Dias para alerta", "live": True},
+    {"name": "IMAGE_DASHBOARD_TOP_ROWS_LIMIT", "global": "TOP_ROWS_LIMIT", "type": "int", "group": "Relatorio", "label": "Limite de destaques", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "global": "SQLITE_TIMEOUT_SECONDS", "type": "int", "group": "SQLite", "label": "Timeout SQLite (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "global": "SQLITE_JOURNAL_MODE", "type": "str", "group": "SQLite", "label": "Journal mode", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "global": "SQLITE_SYNCHRONOUS", "type": "str", "group": "SQLite", "label": "Synchronous", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_TEMP_STORE", "global": "SQLITE_TEMP_STORE", "type": "str", "group": "SQLite", "label": "Temp store", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_CACHE_SIZE", "global": "SQLITE_CACHE_SIZE", "type": "int", "group": "SQLite", "label": "Cache size", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_BUSY_TIMEOUT_MS", "global": "SQLITE_BUSY_TIMEOUT_MS", "type": "int", "group": "SQLite", "label": "Busy timeout (ms)", "live": True},
+    {"name": "IMAGE_DASHBOARD_DB_STATUS_TIMEOUT_SECONDS", "global": "DB_STATUS_TIMEOUT_SECONDS", "type": "int", "group": "SQLite", "label": "Timeout db-status (s)", "live": True},
+]
 
 
 def iso_now() -> str:
@@ -78,6 +152,108 @@ def parse_int(value: str, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def config_value_to_text(value: object, value_type: str) -> str:
+    if value_type == "bool":
+        return "1" if value else "0"
+    if value_type == "csv_set":
+        return ",".join(sorted(value)) if isinstance(value, set) else str(value)
+    if value_type == "day_levels":
+        return ",".join(f"{threshold}:{level}" for threshold, level in value)
+    return str(value)
+
+
+def parse_config_value(raw_value: object, value_type: str) -> object:
+    text = str(raw_value).strip()
+    if value_type == "bool":
+        return text.lower() in {"1", "true", "yes", "on"}
+    if value_type == "int":
+        return int(text)
+    if value_type == "path":
+        return Path(text)
+    if value_type == "csv_set":
+        return {item.strip().lower() for item in text.split(",") if item.strip()}
+    if value_type == "day_levels":
+        levels = []
+        for item in text.split(","):
+            if ":" not in item:
+                continue
+            threshold, level = item.split(":", 1)
+            levels.append((int(threshold.strip()), level.strip()))
+        return tuple(sorted(levels))
+    return text
+
+
+def build_config_payload() -> dict:
+    fields = []
+    for field in CONFIG_FIELDS:
+        value = globals()[field["global"]]
+        display_value = config.CONFIG_OVERRIDES.get(field["name"])
+        if display_value is None:
+            display_value = config_value_to_text(value, field["type"])
+        fields.append(
+            {
+                "name": field["name"],
+                "label": field["label"],
+                "group": field["group"],
+                "type": field["type"],
+                "live": field["live"],
+                "value": str(display_value),
+            }
+        )
+    return {
+        "status": "ok",
+        "generated_at": iso_now(),
+        "config_file": str(CONFIG_FILE),
+        "fields": fields,
+    }
+
+
+def save_config_overrides(values: Dict[str, str]) -> None:
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(values, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    config.CONFIG_OVERRIDES.clear()
+    config.CONFIG_OVERRIDES.update(values)
+
+
+def update_config_payload(payload: dict) -> dict:
+    incoming = payload.get("values") if isinstance(payload, dict) else None
+    if not isinstance(incoming, dict):
+        raise ValueError("Payload invalido. Envie {'values': {...}}.")
+
+    current_overrides = dict(config.CONFIG_OVERRIDES)
+    applied = []
+    restart_required = []
+
+    for field in CONFIG_FIELDS:
+        name = field["name"]
+        if name not in incoming:
+            continue
+        raw_value = str(incoming[name]).strip()
+        parsed_value = parse_config_value(raw_value, field["type"])
+        current_overrides[name] = raw_value
+
+        if field["live"]:
+            globals()[field["global"]] = parsed_value
+            applied.append(name)
+        else:
+            restart_required.append(name)
+
+    global DATE_DIR_PATTERN, TIMESTAMP_FILE_PATTERN, FFPROBE_AVAILABLE
+    DATE_DIR_PATTERN = re.compile(DATE_DIR_REGEX)
+    TIMESTAMP_FILE_PATTERN = re.compile(TIMESTAMP_FILE_REGEX)
+    FFPROBE_AVAILABLE = None
+
+    save_config_overrides(current_overrides)
+    start_background_schedulers()
+    return {
+        "status": "ok",
+        "generated_at": iso_now(),
+        "config_file": str(CONFIG_FILE),
+        "applied": applied,
+        "restart_required": restart_required,
+    }
 
 
 def parse_month_year(query: Dict[str, List[str]]) -> Tuple[int, int]:
@@ -94,6 +270,22 @@ def parse_multi_filter(query: Dict[str, List[str]], key: str) -> List[str]:
     for raw_value in query.get(key, []):
         values.extend(part.strip() for part in raw_value.split(","))
     return [value for value in values if value]
+
+
+def parse_remote_garages(value: Optional[str] = None) -> Dict[str, str]:
+    if value is None:
+        value = REMOTE_GARAGES
+    garages: Dict[str, str] = {}
+    for raw_item in value.split(";"):
+        item = raw_item.strip()
+        if not item or ":" not in item:
+            continue
+        name, base_url = item.split(":", 1)
+        name = name.strip()
+        base_url = base_url.strip().rstrip("/")
+        if name and base_url:
+            garages[name] = base_url
+    return garages
 
 
 def build_month_dates(month: int, year: int) -> List[str]:
@@ -124,14 +316,14 @@ def vehicle_sort_key(value: str) -> Tuple[int, object]:
     return (1, cleaned.lower())
 
 
-def open_db() -> sqlite3.Connection:
-    connection = sqlite3.connect(DB_PATH, timeout=30)
+def open_db(timeout_seconds: int = SQLITE_TIMEOUT_SECONDS) -> sqlite3.Connection:
+    connection = sqlite3.connect(DB_PATH, timeout=timeout_seconds)
     connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA synchronous=NORMAL")
-    connection.execute("PRAGMA temp_store=MEMORY")
-    connection.execute("PRAGMA cache_size=-64000")
-    connection.execute("PRAGMA busy_timeout=30000")
+    connection.execute(f"PRAGMA journal_mode={SQLITE_JOURNAL_MODE}")
+    connection.execute(f"PRAGMA synchronous={SQLITE_SYNCHRONOUS}")
+    connection.execute(f"PRAGMA temp_store={SQLITE_TEMP_STORE}")
+    connection.execute(f"PRAGMA cache_size={SQLITE_CACHE_SIZE}")
+    connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     return connection
 
 
@@ -150,6 +342,7 @@ def ensure_database() -> None:
             """
             CREATE TABLE IF NOT EXISTS indexed_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                garage TEXT NOT NULL DEFAULT 'G1',
                 vehicle TEXT NOT NULL,
                 camera TEXT NOT NULL,
                 capture_date TEXT NOT NULL,
@@ -178,6 +371,7 @@ def ensure_database() -> None:
 
             CREATE TABLE IF NOT EXISTS camera_inventory (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                garage TEXT NOT NULL DEFAULT 'G1',
                 vehicle TEXT NOT NULL,
                 camera TEXT NOT NULL,
                 source_dir TEXT NOT NULL UNIQUE,
@@ -197,9 +391,26 @@ def ensure_database() -> None:
             );
             """
         )
+        ensure_column(connection, "indexed_files", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "indexed_files", "last_seen_scan_id", "TEXT")
         ensure_column(connection, "indexed_files", "duration_seconds", "REAL")
+        ensure_column(connection, "camera_inventory", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "camera_inventory", "last_seen_scan_id", "TEXT")
+        connection.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_month
+                ON indexed_files (garage, capture_date, vehicle, camera);
+
+            CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_vehicle_capture
+                ON indexed_files (garage, vehicle, capture_date);
+
+            CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_capture_id
+                ON indexed_files (garage, capture_date, id);
+
+            CREATE INDEX IF NOT EXISTS idx_camera_inventory_garage_vehicle_camera
+                ON camera_inventory (garage, vehicle, camera);
+            """
+        )
         connection.commit()
 
 
@@ -231,7 +442,7 @@ def safe_scandir(path: Path) -> List[os.DirEntry]:
 def has_ffprobe() -> bool:
     global FFPROBE_AVAILABLE
     if FFPROBE_AVAILABLE is None:
-        FFPROBE_AVAILABLE = shutil.which("ffprobe") is not None
+        FFPROBE_AVAILABLE = shutil.which(FFPROBE_BINARY) is not None
     return FFPROBE_AVAILABLE
 
 
@@ -246,7 +457,7 @@ def probe_duration_seconds(file_path: Path) -> Optional[float]:
     try:
         result = subprocess.run(
             [
-                "ffprobe",
+                FFPROBE_BINARY,
                 "-v",
                 "error",
                 "-show_entries",
@@ -257,7 +468,7 @@ def probe_duration_seconds(file_path: Path) -> Optional[float]:
             ],
             capture_output=True,
             text=True,
-            timeout=1,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
@@ -304,6 +515,7 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
     connection.executemany(
         """
         INSERT INTO indexed_files (
+            garage,
             vehicle,
             camera,
             capture_date,
@@ -318,8 +530,9 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
             modified_at,
             indexed_at,
             last_seen_scan_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(relative_file_path) DO UPDATE SET
+            garage = excluded.garage,
             vehicle = excluded.vehicle,
             camera = excluded.camera,
             capture_date = excluded.capture_date,
@@ -351,14 +564,16 @@ def flush_camera_batch(connection: sqlite3.Connection, batch: List[tuple]) -> No
     connection.executemany(
         """
         INSERT INTO camera_inventory (
+            garage,
             vehicle,
             camera,
             source_dir,
             real_dir,
             indexed_at,
             last_seen_scan_id
-        ) VALUES (?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_dir) DO UPDATE SET
+            garage = excluded.garage,
             vehicle = excluded.vehicle,
             camera = excluded.camera,
             real_dir = excluded.real_dir,
@@ -388,8 +603,8 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         connection.commit()
 
         if full_refresh:
-            connection.execute("DELETE FROM indexed_files")
-            connection.execute("DELETE FROM camera_inventory")
+            connection.execute("DELETE FROM indexed_files WHERE garage = ?", (LOCAL_GARAGE,))
+            connection.execute("DELETE FROM camera_inventory WHERE garage = ?", (LOCAL_GARAGE,))
             connection.commit()
 
         file_batch: List[tuple] = []
@@ -425,9 +640,10 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
                 total_cameras += 1
                 camera_batch.append(
                     (
+                        LOCAL_GARAGE,
                         vehicle_name,
                         camera_name,
-                        str(camera_path),
+                        f"{LOCAL_GARAGE}:{camera_path}",
                         camera_real,
                         indexed_at,
                         scan_id,
@@ -472,13 +688,14 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
                         total_files += 1
                         file_batch.append(
                             (
+                                LOCAL_GARAGE,
                                 vehicle_name,
                                 camera_name,
                                 day_entry.name,
                                 file_name,
                                 os.path.splitext(file_name)[1].lower() or "[sem_ext]",
                                 relative_dir,
-                                f"{relative_dir}/{file_name}",
+                                    f"{LOCAL_GARAGE}/{relative_dir}/{file_name}",
                                 file_source_path,
                                 str(Path(day_real) / file_name),
                                 stat_info.st_size if stat_info else None,
@@ -492,7 +709,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
                                 scan_id,
                             )
                         )
-                        if total_files % 250 == 0:
+                        if SCAN_PROGRESS_EVERY_FILES > 0 and total_files % SCAN_PROGRESS_EVERY_FILES == 0:
                             update_scan_state(
                                 files_scanned=total_files,
                                 cameras_scanned=total_cameras,
@@ -508,12 +725,12 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         flush_file_batch(connection, file_batch)
 
         deleted_files = connection.execute(
-            "DELETE FROM indexed_files WHERE COALESCE(last_seen_scan_id, '') != ?",
-            (scan_id,),
+            "DELETE FROM indexed_files WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
+            (LOCAL_GARAGE, scan_id),
         ).rowcount
         deleted_cameras = connection.execute(
-            "DELETE FROM camera_inventory WHERE COALESCE(last_seen_scan_id, '') != ?",
-            (scan_id,),
+            "DELETE FROM camera_inventory WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
+            (LOCAL_GARAGE, scan_id),
         ).rowcount
 
         set_metadata(connection, "last_scan_started_at", started_at)
@@ -609,7 +826,7 @@ def hydrate_missing_durations() -> dict:
                 updated_files += 1
                 update_batch.append((duration_seconds, row["id"]))
 
-            if len(update_batch) >= 200:
+            if DURATION_UPDATE_BATCH_SIZE > 0 and len(update_batch) >= DURATION_UPDATE_BATCH_SIZE:
                 if get_scan_status().get("running"):
                     update_batch.clear()
                     break
@@ -778,22 +995,547 @@ def start_scan(full_refresh: bool = False) -> dict:
 
 def run_periodic_scan_scheduler() -> None:
     while True:
+        if SCAN_INTERVAL_SECONDS <= 0:
+            time.sleep(1)
+            continue
         time.sleep(max(1, SCAN_INTERVAL_SECONDS))
-        start_scan(full_refresh=False)
+        if SCAN_INTERVAL_SECONDS > 0:
+            start_scan(full_refresh=False)
 
 
 def run_periodic_duration_scheduler() -> None:
     while True:
+        if DURATION_INTERVAL_SECONDS <= 0:
+            time.sleep(1)
+            continue
         time.sleep(max(1, DURATION_INTERVAL_SECONDS))
         if ENABLE_VIDEO_DURATION and not get_scan_status().get("running"):
             start_duration_job()
 
 
 def start_background_schedulers() -> None:
-    if SCAN_INTERVAL_SECONDS > 0:
-        threading.Thread(target=run_periodic_scan_scheduler, daemon=True).start()
-    if ENABLE_VIDEO_DURATION and DURATION_INTERVAL_SECONDS > 0:
-        threading.Thread(target=run_periodic_duration_scheduler, daemon=True).start()
+    with SCHEDULER_LOCK:
+        if "scan" not in SCHEDULERS_STARTED:
+            threading.Thread(target=run_periodic_scan_scheduler, daemon=True).start()
+            SCHEDULERS_STARTED.add("scan")
+        if "duration" not in SCHEDULERS_STARTED:
+            threading.Thread(target=run_periodic_duration_scheduler, daemon=True).start()
+            SCHEDULERS_STARTED.add("duration")
+        if parse_remote_garages() and "remote_health" not in SCHEDULERS_STARTED:
+            threading.Thread(target=run_remote_health_scheduler, daemon=True).start()
+            SCHEDULERS_STARTED.add("remote_health")
+        if parse_remote_garages() and "remote_sync" not in SCHEDULERS_STARTED:
+            threading.Thread(target=run_remote_sync_scheduler, daemon=True).start()
+            SCHEDULERS_STARTED.add("remote_sync")
+
+
+def parse_export_range(query: Dict[str, List[str]]) -> Tuple[str, str]:
+    today = date.today()
+    default_from = (today - timedelta(days=REMOTE_SYNC_DAYS)).isoformat()
+    default_to = (today + timedelta(days=1)).isoformat()
+    start_date = query.get("from", [default_from])[0]
+    end_date = query.get("to", [default_to])[0]
+    if not DATE_DIR_PATTERN.match(start_date):
+        start_date = default_from
+    if not DATE_DIR_PATTERN.match(end_date):
+        end_date = default_to
+    return start_date, end_date
+
+
+def build_export_payload(query: Dict[str, List[str]]) -> dict:
+    ensure_database()
+    start_date, end_date = parse_export_range(query)
+    limit = max(0, parse_int(query.get("limit", ["0"])[0], 0))
+    offset = max(0, parse_int(query.get("offset", ["0"])[0], 0))
+    after_date = query.get("after_date", [""])[0]
+    after_id = max(0, parse_int(query.get("after_id", ["0"])[0], 0))
+    include_cameras = query.get("include_cameras", ["1"])[0] != "0"
+    file_sql = """
+        SELECT
+            id,
+            garage,
+            vehicle,
+            camera,
+            capture_date,
+            file_name,
+            extension,
+            relative_dir,
+            relative_file_path,
+            source_path,
+            real_path,
+            size_bytes,
+            duration_seconds,
+            modified_at,
+            indexed_at,
+            last_seen_scan_id
+        FROM indexed_files
+        WHERE garage = ?
+          AND capture_date >= ?
+          AND capture_date < ?
+    """
+    file_params: List[object] = [LOCAL_GARAGE, start_date, end_date]
+    if DATE_DIR_PATTERN.match(after_date) and after_id > 0:
+        file_sql += " AND (capture_date > ? OR (capture_date = ? AND id > ?))"
+        file_params.extend([after_date, after_date, after_id])
+        offset = 0
+    file_sql += " ORDER BY capture_date, id"
+    if limit:
+        file_sql += " LIMIT ? OFFSET ?"
+        file_params.extend([limit + 1, offset])
+
+    with open_db() as connection:
+        file_rows = connection.execute(file_sql, file_params).fetchall()
+        camera_rows = []
+        if include_cameras:
+            camera_rows = connection.execute(
+                """
+                SELECT
+                    garage,
+                    vehicle,
+                    camera,
+                    source_dir,
+                    real_dir,
+                    indexed_at,
+                    last_seen_scan_id
+                FROM camera_inventory
+                WHERE garage = ?
+                ORDER BY vehicle, camera
+                """,
+                (LOCAL_GARAGE,),
+            ).fetchall()
+
+    has_more = bool(limit and len(file_rows) > limit)
+    if has_more:
+        file_rows = file_rows[:limit]
+    next_row = file_rows[-1] if has_more and file_rows else None
+
+    return {
+        "status": "ok",
+        "garage": LOCAL_GARAGE,
+        "generated_at": iso_now(),
+        "from": start_date,
+        "to": end_date,
+        "limit": limit,
+        "offset": offset,
+        "next_offset": offset + len(file_rows) if has_more else None,
+        "next_after_date": next_row["capture_date"] if next_row else None,
+        "next_after_id": next_row["id"] if next_row else None,
+        "has_more": has_more,
+        "files": [dict(row) for row in file_rows],
+        "cameras": [dict(row) for row in camera_rows],
+    }
+
+
+def fetch_remote_json(base_url: str, path: str, query: Optional[Dict[str, str]] = None) -> dict:
+    url = f"{base_url}{path}"
+    if query:
+        url = f"{url}?{urlencode(query)}"
+    try:
+        with urlopen(url, timeout=REMOTE_REQUEST_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8")
+        return json.loads(body)
+    except TimeoutError as exc:
+        raise TimeoutError(f"Timeout ao chamar {url}") from exc
+    except OSError as exc:
+        raise OSError(f"Falha ao chamar {url}: {exc}") from exc
+
+
+def update_remote_garage_state(garage: str, status: str, error: Optional[str] = None) -> None:
+    with REMOTE_LOCK:
+        previous_state = REMOTE_GARAGE_STATE.get(garage, {})
+        checked_at = iso_now()
+        last_online_at = checked_at if status == "online" else previous_state.get("last_online_at")
+        REMOTE_GARAGE_STATE[garage] = {
+            "status": status,
+            "checked_at": checked_at,
+            "last_online_at": last_online_at,
+            "error": error,
+        }
+
+
+def update_remote_sync_state(**kwargs: object) -> None:
+    with REMOTE_LOCK:
+        for key, value in kwargs.items():
+            REMOTE_SYNC_STATE[key] = value
+
+
+def get_remote_sync_state() -> dict:
+    with REMOTE_LOCK:
+        return dict(REMOTE_SYNC_STATE)
+
+
+def upsert_remote_export(payload: dict, expected_garage: str, sync_id: str, prune: bool = True) -> dict:
+    exported_garage = payload.get("garage") or expected_garage
+    files = payload.get("files") or []
+    cameras = payload.get("cameras") or []
+    start_date = payload.get("from")
+    end_date = payload.get("to")
+    imported_files = 0
+    imported_cameras = 0
+
+    with open_db() as connection:
+        camera_batch = []
+        for row in cameras:
+            garage = row.get("garage") or exported_garage
+            if garage != expected_garage:
+                garage = expected_garage
+            camera_batch.append(
+                (
+                    garage,
+                    row.get("vehicle"),
+                    row.get("camera"),
+                    row.get("source_dir") or f"{garage}:{row.get('vehicle')}/{row.get('camera')}",
+                    row.get("real_dir") or "",
+                    row.get("indexed_at") or iso_now(),
+                    sync_id,
+                )
+            )
+            imported_cameras += 1
+            if len(camera_batch) >= INDEX_CAMERA_BATCH_SIZE:
+                flush_camera_batch(connection, camera_batch)
+        flush_camera_batch(connection, camera_batch)
+
+        file_batch = []
+        for row in files:
+            garage = row.get("garage") or exported_garage
+            if garage != expected_garage:
+                garage = expected_garage
+            file_batch.append(
+                (
+                    garage,
+                    row.get("vehicle"),
+                    row.get("camera"),
+                    row.get("capture_date"),
+                    row.get("file_name"),
+                    row.get("extension") or "[sem_ext]",
+                    row.get("relative_dir") or "",
+                    row.get("relative_file_path") or f"{garage}/{row.get('vehicle')}/{row.get('camera')}/{row.get('capture_date')}/{row.get('file_name')}",
+                    row.get("source_path") or "",
+                    row.get("real_path") or row.get("source_path") or "",
+                    row.get("size_bytes"),
+                    row.get("duration_seconds"),
+                    row.get("modified_at"),
+                    row.get("indexed_at") or iso_now(),
+                    sync_id,
+                )
+            )
+            imported_files += 1
+            if len(file_batch) >= INDEX_FILE_BATCH_SIZE:
+                flush_file_batch(connection, file_batch)
+        flush_file_batch(connection, file_batch)
+
+        deleted_files = 0
+        deleted_cameras = 0
+        if prune and start_date and end_date:
+            deleted_files = connection.execute(
+                """
+                DELETE FROM indexed_files
+                WHERE garage = ?
+                  AND capture_date >= ?
+                  AND capture_date < ?
+                  AND COALESCE(last_seen_scan_id, '') != ?
+                """,
+                (expected_garage, start_date, end_date, sync_id),
+            ).rowcount
+        if prune:
+            deleted_cameras = connection.execute(
+                """
+                DELETE FROM camera_inventory
+                WHERE garage = ?
+                  AND COALESCE(last_seen_scan_id, '') != ?
+                """,
+                (expected_garage, sync_id),
+            ).rowcount
+        connection.commit()
+
+    return {
+        "garage": expected_garage,
+        "imported_files": imported_files,
+        "imported_cameras": imported_cameras,
+        "deleted_files": deleted_files,
+        "deleted_cameras": deleted_cameras,
+    }
+
+
+def prune_remote_sync(garage: str, sync_id: str, start_date: str, end_date: str) -> dict:
+    with open_db() as connection:
+        deleted_files = connection.execute(
+            """
+            DELETE FROM indexed_files
+            WHERE garage = ?
+              AND capture_date >= ?
+              AND capture_date < ?
+              AND COALESCE(last_seen_scan_id, '') != ?
+            """,
+            (garage, start_date, end_date, sync_id),
+        ).rowcount
+        deleted_cameras = connection.execute(
+            """
+            DELETE FROM camera_inventory
+            WHERE garage = ?
+              AND COALESCE(last_seen_scan_id, '') != ?
+            """,
+            (garage, sync_id),
+        ).rowcount
+        connection.commit()
+    return {"deleted_files": deleted_files, "deleted_cameras": deleted_cameras}
+
+
+def sync_remote_garage(garage: str, base_url: str) -> dict:
+    sync_id = f"remote-{garage}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    today = date.today()
+    start_date = (today - timedelta(days=REMOTE_SYNC_DAYS)).isoformat()
+    end_date = (today + timedelta(days=1)).isoformat()
+    imported_files = 0
+    imported_cameras = 0
+    pages = 0
+    try:
+        update_remote_sync_state(current_garage=garage, current_step="healthcheck")
+        health = fetch_remote_json(base_url, "/api/garage-health")
+        if health.get("status") != "ok":
+            raise RuntimeError(f"Health remoto inválido: {health}")
+        update_remote_garage_state(garage, "online")
+        offset = 0
+        after_date = ""
+        after_id = 0
+        while True:
+            update_remote_sync_state(current_garage=garage, current_step="export", pages=pages)
+            export_query = {
+                "from": start_date,
+                "to": end_date,
+                "limit": str(REMOTE_EXPORT_BATCH_SIZE),
+                "include_cameras": "1" if not after_id and offset == 0 else "0",
+            }
+            if after_date and after_id:
+                export_query["after_date"] = after_date
+                export_query["after_id"] = str(after_id)
+            else:
+                export_query["offset"] = str(offset)
+            payload = fetch_remote_json(base_url, "/api/export", export_query)
+            update_remote_sync_state(current_garage=garage, current_step="import")
+            result = upsert_remote_export(payload, garage, sync_id, prune=False)
+            imported_files += result["imported_files"]
+            imported_cameras += result["imported_cameras"]
+            pages += 1
+            state = get_remote_sync_state()
+            update_remote_sync_state(
+                pages=pages,
+                imported_files=int(state.get("imported_files") or 0) + result["imported_files"],
+                imported_cameras=int(state.get("imported_cameras") or 0) + result["imported_cameras"],
+            )
+            if not payload.get("has_more"):
+                break
+            after_date = payload.get("next_after_date") or ""
+            after_id = int(payload.get("next_after_id") or 0)
+            if not after_date or not after_id:
+                offset = int(payload.get("next_offset") or (offset + REMOTE_EXPORT_BATCH_SIZE))
+        update_remote_sync_state(current_garage=garage, current_step="prune")
+        prune_result = prune_remote_sync(garage, sync_id, start_date, end_date)
+        update_remote_garage_state(garage, "online")
+        return {
+            "status": "ok",
+            "garage": garage,
+            "imported_files": imported_files,
+            "imported_cameras": imported_cameras,
+            "pages": pages,
+            **prune_result,
+        }
+    except Exception as exc:
+        update_remote_garage_state(garage, "offline", str(exc))
+        return {"status": "error", "garage": garage, "error": str(exc)}
+
+
+def sync_remote_garages_once() -> List[dict]:
+    return [
+        sync_remote_garage(garage, base_url)
+        for garage, base_url in parse_remote_garages().items()
+    ]
+
+
+def check_remote_garage_health(garage: str, base_url: str) -> dict:
+    try:
+        health = fetch_remote_json(base_url, "/api/garage-health")
+        if health.get("status") != "ok":
+            raise RuntimeError(f"Health remoto invalido: {health}")
+        update_remote_garage_state(garage, "online")
+        return {"status": "online", "garage": garage}
+    except Exception as exc:
+        update_remote_garage_state(garage, "offline", str(exc))
+        return {"status": "offline", "garage": garage, "error": str(exc)}
+
+
+def check_remote_garages_health_once() -> List[dict]:
+    return [
+        check_remote_garage_health(garage, base_url)
+        for garage, base_url in parse_remote_garages().items()
+    ]
+
+
+def run_remote_sync_job() -> dict:
+    if not REMOTE_SYNC_LOCK.acquire(blocking=False):
+        return {"status": "busy", "message": "Sincronizacao remota ja esta em andamento.", "sync": get_remote_sync_state()}
+
+    started_at = iso_now()
+    update_remote_sync_state(
+        running=True,
+        started_at=started_at,
+        finished_at=None,
+        current_garage=None,
+        current_step="starting",
+        pages=0,
+        imported_files=0,
+        imported_cameras=0,
+        error=None,
+        results=[],
+    )
+    try:
+        results = sync_remote_garages_once()
+        error = next((result.get("error") for result in results if result.get("status") == "error"), None)
+        update_remote_sync_state(
+            running=False,
+            finished_at=iso_now(),
+            current_garage=None,
+            current_step="finished",
+            error=error,
+            results=results,
+        )
+        return {"status": "ok", "started_at": started_at, "finished_at": get_remote_sync_state().get("finished_at"), "results": results}
+    except Exception as exc:
+        update_remote_sync_state(
+            running=False,
+            finished_at=iso_now(),
+            current_step="error",
+            error=str(exc),
+        )
+        raise
+    finally:
+        REMOTE_SYNC_LOCK.release()
+
+
+def start_remote_sync_job() -> dict:
+    if get_remote_sync_state().get("running"):
+        return {"status": "busy", "message": "Sincronizacao remota ja esta em andamento.", "sync": get_remote_sync_state()}
+    thread = threading.Thread(target=run_remote_sync_job, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "Sincronizacao remota iniciada em background.", "sync": get_remote_sync_state()}
+
+
+def run_remote_sync_scheduler() -> None:
+    while True:
+        if REMOTE_SYNC_INTERVAL_SECONDS <= 0 or not parse_remote_garages():
+            time.sleep(1)
+            continue
+        run_remote_sync_job()
+        time.sleep(max(1, REMOTE_SYNC_INTERVAL_SECONDS))
+
+
+def run_remote_health_scheduler() -> None:
+    while True:
+        if REMOTE_HEALTH_INTERVAL_SECONDS <= 0 or not parse_remote_garages():
+            time.sleep(1)
+            continue
+        check_remote_garages_health_once()
+        time.sleep(max(1, REMOTE_HEALTH_INTERVAL_SECONDS))
+
+
+def get_garage_statuses(garages: List[str]) -> List[dict]:
+    remote_config = parse_remote_garages()
+    with REMOTE_LOCK:
+        remote_state = dict(REMOTE_GARAGE_STATE)
+        sync_state = dict(REMOTE_SYNC_STATE)
+
+    statuses = []
+    for garage in garages:
+        if garage == LOCAL_GARAGE:
+            statuses.append({"name": garage, "status": "online"})
+            continue
+        if sync_state.get("running") and sync_state.get("current_garage") == garage:
+            statuses.append(
+                {
+                    "name": garage,
+                    "status": "online",
+                    "syncing": True,
+                    "checked_at": sync_state.get("started_at"),
+                    "last_online_at": remote_state.get(garage, {}).get("last_online_at"),
+                    "step": sync_state.get("current_step"),
+                    "pages": sync_state.get("pages"),
+                    "imported_files": sync_state.get("imported_files"),
+                }
+            )
+            continue
+        state = remote_state.get(garage)
+        if state:
+            statuses.append(
+                {
+                    "name": garage,
+                    "status": state.get("status", "offline"),
+                    "checked_at": state.get("checked_at"),
+                    "last_online_at": state.get("last_online_at"),
+                }
+            )
+        elif garage in remote_config:
+            statuses.append({"name": garage, "status": "offline", "last_online_at": None})
+        else:
+            statuses.append({"name": garage, "status": "offline", "last_online_at": None})
+    return statuses
+
+
+def build_remote_status() -> dict:
+    configured = parse_remote_garages()
+    garage_names = sorted({LOCAL_GARAGE, *configured.keys()}, key=vehicle_sort_key)
+    return {
+        "status": "ok",
+        "local_garage": LOCAL_GARAGE,
+        "configured_remotes": configured,
+        "remote_health_interval_seconds": REMOTE_HEALTH_INTERVAL_SECONDS,
+        "remote_sync_interval_seconds": REMOTE_SYNC_INTERVAL_SECONDS,
+        "remote_sync_days": REMOTE_SYNC_DAYS,
+        "remote_timeout_seconds": REMOTE_REQUEST_TIMEOUT_SECONDS,
+        "remote_export_batch_size": REMOTE_EXPORT_BATCH_SIZE,
+        "sync": get_remote_sync_state(),
+        "garages": get_garage_statuses(garage_names),
+    }
+
+
+def build_db_status() -> dict:
+    started = time.perf_counter()
+    with open_db(timeout_seconds=DB_STATUS_TIMEOUT_SECONDS) as connection:
+        journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        database_list = [dict(row) for row in connection.execute("PRAGMA database_list").fetchall()]
+        file_counts = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT garage, COUNT(*) AS files
+                FROM indexed_files
+                GROUP BY garage
+                ORDER BY garage
+                """
+            ).fetchall()
+        ]
+        camera_counts = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT garage, COUNT(*) AS cameras
+                FROM camera_inventory
+                GROUP BY garage
+                ORDER BY garage
+                """
+            ).fetchall()
+        ]
+    return {
+        "status": "ok",
+        "generated_at": iso_now(),
+        "database": str(DB_PATH),
+        "journal_mode": journal_mode,
+        "busy_timeout_ms": busy_timeout,
+        "database_list": database_list,
+        "file_counts": file_counts,
+        "camera_counts": camera_counts,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+    }
 
 
 def build_dashboard(query: Dict[str, List[str]]) -> dict:
@@ -806,12 +1548,16 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         next_month = 1
         next_month_year += 1
     next_month_start = f"{next_month_year:04d}-{next_month:02d}-01"
+    garage_filters = parse_multi_filter(query, "garage")
     vehicle_filters = parse_multi_filter(query, "vehicle")
     camera_filters = parse_multi_filter(query, "camera")
 
     clauses = ["capture_date >= ?", "capture_date < ?"]
     params: List[str] = [month_start, next_month_start]
 
+    if garage_filters:
+        clauses.append(f"garage IN ({', '.join('?' for _ in garage_filters)})")
+        params.extend(garage_filters)
     if vehicle_filters:
         clauses.append(f"vehicle IN ({', '.join('?' for _ in vehicle_filters)})")
         params.extend(vehicle_filters)
@@ -826,21 +1572,26 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         rows = connection.execute(
             f"""
             SELECT
+                garage,
                 vehicle,
                 camera,
                 capture_date,
                 COUNT(*) AS total,
+                COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
                 MAX(file_name) AS latest_file
             FROM indexed_files
             WHERE {where_sql}
-            GROUP BY vehicle, camera, capture_date
-            ORDER BY vehicle, camera, capture_date
+            GROUP BY garage, vehicle, camera, capture_date
+            ORDER BY vehicle, camera, capture_date, garage
             """,
             params,
         ).fetchall()
 
         inventory_clauses = ["1 = 1"]
         inventory_params: List[str] = []
+        if garage_filters:
+            inventory_clauses.append(f"garage IN ({', '.join('?' for _ in garage_filters)})")
+            inventory_params.extend(garage_filters)
         if vehicle_filters:
             inventory_clauses.append(f"vehicle IN ({', '.join('?' for _ in vehicle_filters)})")
             inventory_params.extend(vehicle_filters)
@@ -868,9 +1619,22 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             """,
             inventory_params,
         ).fetchall()
+        if not inventory_rows:
+            inventory_rows = connection.execute(
+                f"""
+                SELECT DISTINCT vehicle, camera
+                FROM indexed_files
+                WHERE {where_sql}
+                ORDER BY vehicle, camera
+                """,
+                params,
+            ).fetchall()
 
         last_capture_clauses = ["1 = 1"]
         last_capture_params: List[str] = []
+        if garage_filters:
+            last_capture_clauses.append(f"garage IN ({', '.join('?' for _ in garage_filters)})")
+            last_capture_params.extend(garage_filters)
         if vehicle_filters:
             last_capture_clauses.append(f"vehicle IN ({', '.join('?' for _ in vehicle_filters)})")
             last_capture_params.extend(vehicle_filters)
@@ -888,8 +1652,26 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         ).fetchall()
 
         fleet_row = connection.execute(
-            "SELECT COUNT(DISTINCT vehicle) AS total_fleet FROM camera_inventory"
+            f"""
+            SELECT COUNT(DISTINCT vehicle) AS total_fleet
+            FROM camera_inventory
+            WHERE {" AND ".join(["1 = 1"] + (
+                [f"garage IN ({', '.join('?' for _ in garage_filters)})"] if garage_filters else []
+            ))}
+            """,
+            garage_filters,
         ).fetchone()
+        fleet_total = fleet_row["total_fleet"] if fleet_row else 0
+        if fleet_total == 0:
+            fleet_row = connection.execute(
+                f"""
+                SELECT COUNT(DISTINCT vehicle) AS total_fleet
+                FROM indexed_files
+                WHERE {where_sql}
+                """,
+                params,
+            ).fetchone()
+            fleet_total = fleet_row["total_fleet"] if fleet_row else 0
 
         extension_rows = connection.execute(
             f"""
@@ -903,11 +1685,34 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         ).fetchall()
 
         vehicles = connection.execute(
-            "SELECT DISTINCT vehicle FROM camera_inventory ORDER BY vehicle"
+            f"""
+            SELECT DISTINCT vehicle
+            FROM camera_inventory
+            WHERE {" AND ".join(["1 = 1"] + (
+                [f"garage IN ({', '.join('?' for _ in garage_filters)})"] if garage_filters else []
+            ))}
+            ORDER BY vehicle
+            """,
+            garage_filters,
         ).fetchall()
+        if not vehicles:
+            vehicles = connection.execute(
+                f"""
+                SELECT DISTINCT vehicle
+                FROM indexed_files
+                WHERE {" AND ".join(["1 = 1"] + (
+                    [f"garage IN ({', '.join('?' for _ in garage_filters)})"] if garage_filters else []
+                ))}
+                ORDER BY vehicle
+                """,
+                garage_filters,
+            ).fetchall()
 
         available_camera_clauses = ["1 = 1"]
         available_camera_params: List[str] = []
+        if garage_filters:
+            available_camera_clauses.append(f"garage IN ({', '.join('?' for _ in garage_filters)})")
+            available_camera_params.extend(garage_filters)
         if vehicle_filters:
             available_camera_clauses.append(f"vehicle IN ({', '.join('?' for _ in vehicle_filters)})")
             available_camera_params.extend(vehicle_filters)
@@ -920,8 +1725,28 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             """,
             available_camera_params,
         ).fetchall()
+        if not cameras:
+            cameras = connection.execute(
+                f"""
+                SELECT DISTINCT camera
+                FROM indexed_files
+                WHERE {" AND ".join(available_camera_clauses)}
+                ORDER BY camera
+                """,
+                available_camera_params,
+            ).fetchall()
+
+        garages = connection.execute(
+            "SELECT DISTINCT garage FROM camera_inventory ORDER BY garage"
+        ).fetchall()
+        if not garages:
+            garages = connection.execute(
+                "SELECT DISTINCT garage FROM indexed_files ORDER BY garage"
+            ).fetchall()
 
     date_totals: Dict[str, int] = {}
+    date_sizes: Dict[str, int] = {}
+    date_vehicles: Dict[str, set] = {}
     matrix: Dict[str, dict] = {}
     top_by_camera: Dict[Tuple[str, str], dict] = {}
     active_vehicles = set()
@@ -929,7 +1754,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
     active_days = set()
     total_files = 0
     latest_capture = None
-    alert_threshold_date = (date.today() - timedelta(days=3)).isoformat()
+    alert_threshold_date = (date.today() - timedelta(days=ALERT_DAYS_WITHOUT_FILES)).isoformat()
     inventory_vehicles_set = set()
     last_capture_by_vehicle = {
         row["vehicle"]: row["last_capture_date"]
@@ -943,6 +1768,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key] = {
                 "vehicle": row["vehicle"],
                 "cameras": set(),
+                "camera_totals": {},
                 "total": 0,
                 "active_days": set(),
                 "days": {},
@@ -959,6 +1785,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         active_days.add(capture_date)
         latest_capture = max(latest_capture, row["latest_file"]) if latest_capture else row["latest_file"]
         date_totals[capture_date] = date_totals.get(capture_date, 0) + count
+        date_sizes[capture_date] = date_sizes.get(capture_date, 0) + (row["total_size_bytes"] or 0)
+        date_vehicles.setdefault(capture_date, set()).add(row["vehicle"])
 
         top_key = (row["vehicle"], row["camera"])
         if top_key not in top_by_camera:
@@ -982,6 +1810,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key] = {
                 "vehicle": row["vehicle"],
                 "cameras": set(),
+                "camera_totals": {},
                 "total": 0,
                 "active_days": set(),
                 "days": {},
@@ -991,19 +1820,34 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         matrix[matrix_key]["total"] += count
         matrix[matrix_key]["active_days"].add(capture_date)
         matrix[matrix_key]["cameras"].add(row["camera"])
+        camera_total = matrix[matrix_key]["camera_totals"].setdefault(
+            row["camera"],
+            {"name": row["camera"], "count": 0, "size_bytes": 0},
+        )
+        camera_total["count"] += count
+        camera_total["size_bytes"] += row["total_size_bytes"] or 0
         if capture_date not in matrix[matrix_key]["days"]:
             matrix[matrix_key]["days"][capture_date] = {
                 "count": 0,
                 "level": "none",
-                "cameras": [],
+                "cameras": {},
+                "garages": {},
             }
         matrix[matrix_key]["days"][capture_date]["count"] += count
         matrix[matrix_key]["days"][capture_date]["level"] = get_level(
             matrix[matrix_key]["days"][capture_date]["count"]
         )
-        matrix[matrix_key]["days"][capture_date]["cameras"].append(
-            {"name": row["camera"], "count": count}
+        camera_day = matrix[matrix_key]["days"][capture_date]["cameras"].setdefault(
+            row["camera"],
+            {"name": row["camera"], "count": 0},
         )
+        camera_day["count"] += count
+        garage_day = matrix[matrix_key]["days"][capture_date]["garages"].setdefault(
+            row["garage"],
+            {"name": row["garage"], "count": 0, "cameras": []},
+        )
+        garage_day["count"] += count
+        garage_day["cameras"].append({"name": row["camera"], "count": count})
         matrix[matrix_key]["latest_file"] = max(
             matrix[matrix_key]["latest_file"], row["latest_file"]
         ) if matrix[matrix_key]["latest_file"] else row["latest_file"]
@@ -1011,6 +1855,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
     dates = build_month_dates(month, year)
     for capture_date in dates:
         date_totals.setdefault(capture_date, 0)
+        date_sizes.setdefault(capture_date, 0)
+        date_vehicles.setdefault(capture_date, set())
 
     matrix_rows = []
     for row in matrix.values():
@@ -1018,6 +1864,10 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             {
                 "vehicle": row["vehicle"],
                 "cameras": sorted(row["cameras"], key=vehicle_sort_key),
+                "camera_totals": sorted(
+                    row["camera_totals"].values(),
+                    key=lambda item: vehicle_sort_key(item["name"]),
+                ),
                 "camera_count": len(row["cameras"]),
                 "total": row["total"],
                 "active_days": len(row["active_days"]),
@@ -1025,7 +1875,25 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
                     capture_date: {
                         "count": day_data["count"],
                         "level": get_level(day_data["count"]),
-                        "cameras": sorted(day_data["cameras"], key=lambda item: vehicle_sort_key(item["name"])),
+                        "cameras": sorted(
+                            day_data["cameras"].values(),
+                            key=lambda item: vehicle_sort_key(item["name"]),
+                        ),
+                        "garage_names": sorted(day_data["garages"].keys(), key=vehicle_sort_key),
+                        "garages": [
+                            {
+                                "name": garage_data["name"],
+                                "count": garage_data["count"],
+                                "cameras": sorted(
+                                    garage_data["cameras"],
+                                    key=lambda item: vehicle_sort_key(item["name"]),
+                                ),
+                            }
+                            for garage_data in sorted(
+                                day_data["garages"].values(),
+                                key=lambda item: vehicle_sort_key(item["name"]),
+                            )
+                        ],
                     }
                     for capture_date, day_data in row["days"].items()
                 },
@@ -1045,7 +1913,6 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
     )
     inventory_pairs = inventory_row["total_inventory_pairs"] if inventory_row else 0
     inventory_vehicles = inventory_row["total_inventory_vehicles"] if inventory_row else 0
-    fleet_total = fleet_row["total_fleet"] if fleet_row else 0
     top_rows = sorted(
         (
             {
@@ -1058,7 +1925,11 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             for row in top_by_camera.values()
         ),
         key=lambda row: (-row["total"], vehicle_sort_key(row["vehicle"]), vehicle_sort_key(row["camera"])),
-    )[:8]
+    )[:TOP_ROWS_LIMIT]
+    available_garage_names = sorted(
+        {LOCAL_GARAGE, *parse_remote_garages().keys(), *[row["garage"] for row in garages]},
+        key=vehicle_sort_key,
+    )
 
     return {
         "generated_at": iso_now(),
@@ -1067,6 +1938,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         "filters": {
             "month": month,
             "year": year,
+            "garages": garage_filters,
             "vehicles": vehicle_filters,
             "cameras": camera_filters,
         },
@@ -1075,7 +1947,7 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             "active_vehicles": len(active_vehicles),
             "alert_vehicles": alert_vehicles,
             "alert_vehicle_count": len(alert_vehicles),
-            "alert_threshold_days": 3,
+            "alert_threshold_days": ALERT_DAYS_WITHOUT_FILES,
             "fleet_total": fleet_total,
             "cameras": len(active_pairs),
             "total_files": total_files,
@@ -1088,7 +1960,8 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             {
                 "date": date,
                 "total": date_totals[date],
-                "active_cameras": sum(len(row["days"][date]["cameras"]) for row in matrix_rows if date in row["days"]),
+                "vehicles": len(date_vehicles[date]),
+                "total_size_bytes": date_sizes[date],
             }
             for date in dates
         ],
@@ -1096,9 +1969,11 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
         "top_rows": top_rows,
         "extensions": {row["extension"]: row["total"] for row in extension_rows},
         "available_filters": {
+            "garages": available_garage_names,
             "vehicles": [row["vehicle"] for row in vehicles],
             "cameras": [row["camera"] for row in cameras],
         },
+        "garage_status": get_garage_statuses(available_garage_names),
         "scan_info": {
             "last_scan_started_at": metadata.get("last_scan_started_at"),
             "last_scan_finished_at": metadata.get("last_scan_finished_at"),
@@ -1131,6 +2006,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             if parsed.path == "/":
                 return self.serve_file(TEMPLATE_DIR / "index.html", "text/html; charset=utf-8")
+            if parsed.path == "/config":
+                return self.serve_file(TEMPLATE_DIR / "config.html", "text/html; charset=utf-8")
+            if parsed.path == "/api/config":
+                return self.serve_json(build_config_payload())
             if parsed.path == "/api/dashboard":
                 query = parse_qs(parsed.query)
                 return self.serve_json(build_dashboard(query))
@@ -1146,10 +2025,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return self.serve_json(get_scan_status())
             if parsed.path == "/api/duration-status":
                 return self.serve_json(get_duration_status())
+            if parsed.path == "/api/garage-health":
+                return self.serve_json(
+                    {
+                        "status": "ok",
+                        "garage": LOCAL_GARAGE,
+                        "generated_at": iso_now(),
+                    }
+                )
+            if parsed.path == "/api/export":
+                query = parse_qs(parsed.query)
+                return self.serve_json(build_export_payload(query))
+            if parsed.path == "/api/remote-sync":
+                query = parse_qs(parsed.query)
+                if query.get("wait", ["0"])[0] == "1":
+                    return self.serve_json(run_remote_sync_job())
+                payload = start_remote_sync_job()
+                status_code = HTTPStatus.ACCEPTED if payload["status"] == "started" else HTTPStatus.CONFLICT
+                return self.serve_json(
+                    {**payload, "generated_at": iso_now()},
+                    status_code=status_code,
+                )
+            if parsed.path == "/api/remote-status":
+                return self.serve_json(build_remote_status())
+            if parsed.path == "/api/remote-health":
+                return self.serve_json(
+                    {
+                        "status": "ok",
+                        "generated_at": iso_now(),
+                        "results": check_remote_garages_health_once(),
+                    }
+                )
+            if parsed.path == "/api/db-status":
+                return self.serve_json(build_db_status())
             if parsed.path == "/health":
                 return self.serve_json(
                     {
                         "status": "ok",
+                        "garage": LOCAL_GARAGE,
                         "generated_at": iso_now(),
                         "root": str(IMAGE_ROOT),
                         "root_exists": IMAGE_ROOT.exists(),
@@ -1183,8 +2096,38 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
 
+    def do_POST(self) -> None:
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/config":
+                payload = self.read_json_body()
+                return self.serve_json(update_config_payload(payload))
+            self.send_error(HTTPStatus.NOT_FOUND, "Rota nÃ£o encontrada")
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            print(f"[ERRO] Falha ao atender {self.path}: {exc}")
+            traceback.print_exc()
+            try:
+                self.serve_json(
+                    {
+                        "status": "error",
+                        "message": str(exc),
+                        "path": self.path,
+                        "generated_at": iso_now(),
+                    },
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
     def log_message(self, format: str, *args) -> None:
         return
+
+    def read_json_body(self) -> dict:
+        content_length = parse_int(self.headers.get("Content-Length", "0"), 0)
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+        return json.loads(raw_body.decode("utf-8") or "{}")
 
     def serve_json(self, payload: dict, status_code: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
