@@ -1142,9 +1142,13 @@ def fetch_remote_json(base_url: str, path: str, query: Optional[Dict[str, str]] 
 
 def update_remote_garage_state(garage: str, status: str, error: Optional[str] = None) -> None:
     with REMOTE_LOCK:
+        previous_state = REMOTE_GARAGE_STATE.get(garage, {})
+        checked_at = iso_now()
+        last_online_at = checked_at if status == "online" else previous_state.get("last_online_at")
         REMOTE_GARAGE_STATE[garage] = {
             "status": status,
-            "checked_at": iso_now(),
+            "checked_at": checked_at,
+            "last_online_at": last_online_at,
             "error": error,
         }
 
@@ -1452,6 +1456,7 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
                     "status": "online",
                     "syncing": True,
                     "checked_at": sync_state.get("started_at"),
+                    "last_online_at": remote_state.get(garage, {}).get("last_online_at"),
                     "step": sync_state.get("current_step"),
                     "pages": sync_state.get("pages"),
                     "imported_files": sync_state.get("imported_files"),
@@ -1464,14 +1469,14 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
                 {
                     "name": garage,
                     "status": state.get("status", "offline"),
-                    "error": state.get("error"),
                     "checked_at": state.get("checked_at"),
+                    "last_online_at": state.get("last_online_at"),
                 }
             )
         elif garage in remote_config:
-            statuses.append({"name": garage, "status": "offline"})
+            statuses.append({"name": garage, "status": "offline", "last_online_at": None})
         else:
-            statuses.append({"name": garage, "status": "offline"})
+            statuses.append({"name": garage, "status": "offline", "last_online_at": None})
     return statuses
 
 
@@ -1812,16 +1817,18 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key]["days"][capture_date] = {
                 "count": 0,
                 "level": "none",
-                "cameras": [],
+                "cameras": {},
                 "garages": {},
             }
         matrix[matrix_key]["days"][capture_date]["count"] += count
         matrix[matrix_key]["days"][capture_date]["level"] = get_level(
             matrix[matrix_key]["days"][capture_date]["count"]
         )
-        matrix[matrix_key]["days"][capture_date]["cameras"].append(
-            {"name": row["camera"], "count": count, "garage": row["garage"]}
+        camera_day = matrix[matrix_key]["days"][capture_date]["cameras"].setdefault(
+            row["camera"],
+            {"name": row["camera"], "count": 0},
         )
+        camera_day["count"] += count
         garage_day = matrix[matrix_key]["days"][capture_date]["garages"].setdefault(
             row["garage"],
             {"name": row["garage"], "count": 0, "cameras": []},
@@ -1849,7 +1856,10 @@ def build_dashboard(query: Dict[str, List[str]]) -> dict:
                     capture_date: {
                         "count": day_data["count"],
                         "level": get_level(day_data["count"]),
-                        "cameras": sorted(day_data["cameras"], key=lambda item: vehicle_sort_key(item["name"])),
+                        "cameras": sorted(
+                            day_data["cameras"].values(),
+                            key=lambda item: vehicle_sort_key(item["name"]),
+                        ),
                         "garage_names": sorted(day_data["garages"].keys(), key=vehicle_sort_key),
                         "garages": [
                             {
