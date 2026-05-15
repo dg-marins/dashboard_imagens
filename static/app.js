@@ -25,7 +25,7 @@ let scanPollTimer = null;
 let dashboardRequestId = 0;
 let dashboardRefreshTimer = null;
 let dashboardLoading = false;
-const DASHBOARD_REFRESH_INTERVAL_MS = 10000;
+const DASHBOARD_REFRESH_INTERVAL_MS = 20000;
 
 function updateStickyOffsets() {
   if (!filtersBar) return;
@@ -227,6 +227,11 @@ function formatNumber(value) {
   return new Intl.NumberFormat("pt-BR").format(value || 0);
 }
 
+function formatCameraName(value) {
+  const raw = String(value || "");
+  return raw.replace(/^camera/i, "Câmera");
+}
+
 function formatDate(value) {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return value || "";
   const [year, month, day] = value.split("-");
@@ -270,6 +275,22 @@ function formatMatrixHeaderDate(value) {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return value || "";
   const [year, month, day] = value.split("-");
   return `${day}/${month}/${year.slice(2)}`;
+}
+
+function isWeekendDate(value) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const weekDay = new Date(year, month - 1, day).getDay();
+  return weekDay === 0 || weekDay === 6;
+}
+
+function matrixDateHeader(date) {
+  const weekend = isWeekendDate(date);
+  return `
+    <th class="${weekend ? "weekend-date" : ""}" title="${weekend ? "Fim de semana" : ""}">
+      <span>${formatMatrixHeaderDate(date)}</span>
+    </th>
+  `;
 }
 
 function currentMatrixDates() {
@@ -360,7 +381,7 @@ function renderLoadingMatrix(dates = currentMatrixDates()) {
     <th class="sticky vehicle-column" style="min-width:150px">Frota</th>
     <th class="sticky-2" style="min-width:220px">Câmeras</th>
     <th>Dias</th>
-    ${dates.map((date) => `<th>${formatMatrixHeaderDate(date)}</th>`).join("")}
+    ${dates.map(matrixDateHeader).join("")}
   `;
   thead.appendChild(headRow);
 
@@ -453,11 +474,12 @@ function renderGarageStatus(statuses) {
       offline: "Offline",
     };
     const statusLabel = labelByStatus[garage.status] || garage.status || "Offline";
-    const syncMode = garage.mode === "historico" ? "historico" : "recente";
-    const syncDetail = garage.syncing
-      ? `Sincronizando ${syncMode}: etapa ${garage.step || "-"}${garage.imported_files ? `, ${garage.imported_files.toLocaleString("pt-BR")} arquivos` : ""}`
-      : "";
+    const syncDetail = garage.syncing ? "Sincronizando" : "";
+    const lastScan = formatConnectionTimestamp(garage.last_scan_finished_at);
     const lastConnection = formatConnectionTimestamp(garage.last_online_at);
+    const onlineDetail = garage.status === "online" && !garage.syncing
+      ? (lastScan ? `Ultima varredura:<br>${lastScan}` : "Aguardando primeira varredura")
+      : "";
     const offlineDetail = garage.status === "offline"
       ? (lastConnection ? `Ultima conexao:<br>${lastConnection}` : "Aguardando Primeira Conexao")
       : "";
@@ -465,12 +487,19 @@ function renderGarageStatus(statuses) {
     article.className = `garage-status-card ${garage.status || "offline"}${garage.syncing ? " syncing" : ""}`;
     if (syncDetail) {
       article.title = syncDetail;
+    } else if (onlineDetail) {
+      article.title = onlineDetail.replaceAll("<br>", "\n");
     } else if (offlineDetail) {
       article.title = offlineDetail.replaceAll("<br>", "\n");
     }
     article.innerHTML = `
       <span>${garage.name}</span>
       <strong>${statusLabel}</strong>
+      ${onlineDetail ? `
+        <span class="sync-tooltip">
+          ${onlineDetail}
+        </span>
+      ` : ""}
       ${offlineDetail ? `
         <span class="sync-tooltip">
           ${offlineDetail}
@@ -571,7 +600,7 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
     <th class="sticky vehicle-column" style="min-width:150px">Frota: ${formatNumber(fleetTotal)}</th>
     <th class="sticky-2" style="min-width:220px">Câmeras</th>
     <th>Dias</th>
-    ${dates.map((date) => `<th>${formatMatrixHeaderDate(date)}</th>`).join("")}
+    ${dates.map(matrixDateHeader).join("")}
   `;
   thead.appendChild(headRow);
 
@@ -586,7 +615,16 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
     const tr = document.createElement("tr");
     const dayCells = dates.map((date) => {
       const day = entry.days[date];
-      if (!day) return '<td class="cell-none">0</td>';
+      if (!day) {
+        return `
+          <td class="cell-none">
+            <span class="empty-alert" aria-label="Sem arquivos">
+              !
+              <span class="empty-alert-tooltip">Sem arquivos</span>
+            </span>
+          </td>
+        `;
+      }
       const cellKey = `matrix-${entry.vehicle}-${date}`;
 
       const garageNames = day.garage_names || [];
@@ -595,7 +633,12 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
         : "";
 
       const cameraDetails = day.cameras
-        .map((camera) => `<span class="camera-chip" data-update-key="${cellKey}-${camera.name}">${camera.name}: ${formatNumber(camera.count)}</span>`)
+        .map((camera) => `
+          <span class="camera-chip camera-count-chip" data-update-key="${cellKey}-${camera.name}">
+            <span>${formatCameraName(camera.name)}:</span>
+            <b>${formatNumber(camera.count)}</b>
+          </span>
+        `)
         .join("");
 
       return `
@@ -608,7 +651,7 @@ function renderMatrix(dates, rows, fleetTotal = 0) {
     }).join("");
 
     const cameras = entry.cameras
-      .map((camera) => `<span class="camera-chip">${camera}</span>`)
+      .map((camera) => `<span class="camera-chip">${formatCameraName(camera)}</span>`)
       .join("");
 
     tr.innerHTML = `

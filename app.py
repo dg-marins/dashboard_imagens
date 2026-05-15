@@ -1518,15 +1518,24 @@ def fetch_remote_json(base_url: str, path: str, query: Optional[Dict[str, str]] 
         raise OSError(f"Falha ao chamar {url}: {exc}") from exc
 
 
-def update_remote_garage_state(garage: str, status: str, error: Optional[str] = None) -> None:
+def update_remote_garage_state(
+    garage: str,
+    status: str,
+    error: Optional[str] = None,
+    health: Optional[dict] = None,
+) -> None:
     with REMOTE_LOCK:
         previous_state = REMOTE_GARAGE_STATE.get(garage, {})
         checked_at = iso_now()
         last_online_at = checked_at if status == "online" else previous_state.get("last_online_at")
+        last_scan_finished_at = previous_state.get("last_scan_finished_at")
+        if status == "online" and health:
+            last_scan_finished_at = health.get("last_scan_finished_at") or last_scan_finished_at
         REMOTE_GARAGE_STATE[garage] = {
             "status": status,
             "checked_at": checked_at,
             "last_online_at": last_online_at,
+            "last_scan_finished_at": last_scan_finished_at,
             "error": error,
         }
 
@@ -1690,7 +1699,7 @@ def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) ->
         health = fetch_remote_json(base_url, "/api/garage-health")
         if health.get("status") != "ok":
             raise RuntimeError(f"Health remoto inválido: {health}")
-        update_remote_garage_state(garage, "online")
+        update_remote_garage_state(garage, "online", health=health)
         offset = 0
         after_date = ""
         after_id = 0
@@ -1727,7 +1736,7 @@ def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) ->
                 offset = int(payload.get("next_offset") or (offset + REMOTE_EXPORT_BATCH_SIZE))
         update_remote_sync_state(current_garage=garage, current_step="prune", mode=mode, sync_days=sync_days)
         prune_result = prune_remote_sync(garage, sync_id, start_date, end_date)
-        update_remote_garage_state(garage, "online")
+        update_remote_garage_state(garage, "online", health=health)
         return {
             "status": "ok",
             "garage": garage,
@@ -1757,7 +1766,7 @@ def check_remote_garage_health(garage: str, base_url: str) -> dict:
         health = fetch_remote_json(base_url, "/api/garage-health")
         if health.get("status") != "ok":
             raise RuntimeError(f"Health remoto invalido: {health}")
-        update_remote_garage_state(garage, "online")
+        update_remote_garage_state(garage, "online", health=health)
         return {"status": "online", "garage": garage}
     except Exception as exc:
         update_remote_garage_state(garage, "offline", str(exc))
@@ -1850,7 +1859,7 @@ def run_remote_health_scheduler() -> None:
         time.sleep(max(1, REMOTE_HEALTH_INTERVAL_SECONDS))
 
 
-def get_garage_statuses(garages: List[str]) -> List[dict]:
+def get_garage_statuses(garages: List[str], local_last_scan_finished_at: Optional[str] = None) -> List[dict]:
     remote_config = parse_remote_garages()
     with REMOTE_LOCK:
         remote_state = dict(REMOTE_GARAGE_STATE)
@@ -1859,7 +1868,13 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
     statuses = []
     for garage in garages:
         if garage == LOCAL_GARAGE:
-            statuses.append({"name": garage, "status": "online"})
+            statuses.append(
+                {
+                    "name": garage,
+                    "status": "online",
+                    "last_scan_finished_at": local_last_scan_finished_at,
+                }
+            )
             continue
         if sync_state.get("running") and sync_state.get("current_garage") == garage:
             statuses.append(
@@ -1869,6 +1884,7 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
                     "syncing": True,
                     "checked_at": sync_state.get("started_at"),
                     "last_online_at": remote_state.get(garage, {}).get("last_online_at"),
+                    "last_scan_finished_at": remote_state.get(garage, {}).get("last_scan_finished_at"),
                     "step": sync_state.get("current_step"),
                     "mode": sync_state.get("mode"),
                     "pages": sync_state.get("pages"),
@@ -1884,6 +1900,7 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
                     "status": state.get("status", "offline"),
                     "checked_at": state.get("checked_at"),
                     "last_online_at": state.get("last_online_at"),
+                    "last_scan_finished_at": state.get("last_scan_finished_at"),
                 }
             )
         elif garage in remote_config:
@@ -1896,6 +1913,7 @@ def get_garage_statuses(garages: List[str]) -> List[dict]:
 def build_remote_status() -> dict:
     configured = parse_remote_garages()
     garage_names = sorted({LOCAL_GARAGE, *configured.keys()}, key=vehicle_sort_key)
+    metadata = get_metadata()
     return {
         "status": "ok",
         "local_garage": LOCAL_GARAGE,
@@ -1908,7 +1926,7 @@ def build_remote_status() -> dict:
         "remote_timeout_seconds": REMOTE_REQUEST_TIMEOUT_SECONDS,
         "remote_export_batch_size": REMOTE_EXPORT_BATCH_SIZE,
         "sync": get_remote_sync_state(),
-        "garages": get_garage_statuses(garage_names),
+        "garages": get_garage_statuses(garage_names, metadata.get("last_scan_finished_at")),
     }
 
 
@@ -2409,7 +2427,7 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
             "vehicles": [row["vehicle"] for row in vehicles],
             "cameras": [row["camera"] for row in cameras],
         },
-        "garage_status": get_garage_statuses(available_garage_names),
+        "garage_status": get_garage_statuses(available_garage_names, metadata.get("last_scan_finished_at")),
         "scan_info": {
             "last_scan_started_at": metadata.get("last_scan_started_at"),
             "last_scan_finished_at": metadata.get("last_scan_finished_at"),
@@ -2531,10 +2549,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/duration-status":
                 return self.serve_json(get_duration_status())
             if parsed.path == "/api/garage-health":
+                metadata = get_metadata()
                 return self.serve_json(
                     {
                         "status": "ok",
                         "garage": LOCAL_GARAGE,
+                        "last_scan_started_at": metadata.get("last_scan_started_at"),
+                        "last_scan_finished_at": metadata.get("last_scan_finished_at"),
                         "generated_at": iso_now(),
                     }
                 )

@@ -358,6 +358,7 @@ button.ghost:hover {
   box-shadow: 0 12px 30px rgba(35, 50, 44, 0.15);
 }
 
+.garage-status-card.online:hover .sync-tooltip,
 .garage-status-card.syncing:hover .sync-tooltip,
 .garage-status-card.offline:hover .sync-tooltip {
   display: inline-flex;
@@ -856,6 +857,10 @@ table {
   background: var(--surface);
 }
 
+tbody tr {
+  position: relative;
+}
+
 thead th {
   position: sticky;
   top: 0;
@@ -865,6 +870,16 @@ thead th {
   box-shadow: 0 1px 0 var(--line);
 }
 
+thead th.weekend-date {
+  color: var(--ink);
+  background: var(--gold);
+  box-shadow: inset 0 -3px 0 rgba(21, 25, 30, 0.28);
+}
+
+thead th.weekend-date span {
+  display: block;
+}
+
 th,
 td {
   padding: 10px;
@@ -872,10 +887,28 @@ td {
   text-align: center;
   white-space: nowrap;
   font-size: 0.9rem;
+  transition: box-shadow 0.16s ease, filter 0.16s ease;
 }
 
 tbody tr:hover td {
-  background-color: #f8faf8;
+  filter: saturate(1.12) brightness(1.02);
+  box-shadow:
+    inset 0 2px 0 rgba(255, 184, 0, 0.58),
+    inset 0 -2px 0 rgba(255, 184, 0, 0.58);
+}
+
+tbody tr:hover td:first-child {
+  box-shadow:
+    inset 5px 0 0 var(--gold),
+    inset 0 2px 0 rgba(255, 184, 0, 0.58),
+    inset 0 -2px 0 rgba(255, 184, 0, 0.58);
+}
+
+tbody tr:hover td:last-child {
+  box-shadow:
+    inset -2px 0 0 rgba(255, 184, 0, 0.58),
+    inset 0 2px 0 rgba(255, 184, 0, 0.58),
+    inset 0 -2px 0 rgba(255, 184, 0, 0.58);
 }
 
 th.sticky,
@@ -907,48 +940,124 @@ thead th.sticky-2 {
 }
 
 .cell-none {
-  background: rgba(217, 75, 61, 0.1);
+  background: rgba(217, 75, 61, 0.12);
   color: #9c3c34;
+  text-align: center;
+  vertical-align: middle;
 }
 
 .cell-low {
-  background: rgba(255, 184, 0, 0.22);
+  background: rgba(255, 184, 0, 0.28);
+  color: #4b3612;
 }
 
 .cell-medium {
-  background: rgba(23, 178, 106, 0.2);
+  background: rgba(23, 178, 106, 0.22);
+  color: #113d2a;
 }
 
 .cell-high {
-  background: rgba(23, 178, 106, 0.34);
-  color: #0f3d29;
+  background: rgba(23, 126, 77, 0.48);
+  color: #082d1c;
 }
 
 .day-total {
   font-weight: 800;
+  margin-top: 10px;
 }
 
 td[class^="cell-"] {
   position: relative;
+  min-width: 98px;
+  vertical-align: top;
+}
+
+td.cell-none {
+  vertical-align: middle;
+}
+
+td.cell-none .empty-alert {
+  margin-top: 0;
+}
+
+.empty-alert {
+  position: relative;
+  display: inline-flex;
+  width: 17px;
+  height: 17px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #d94b3d;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.empty-alert-tooltip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 9px);
+  z-index: 70;
+  display: none;
+  width: max-content;
+  max-width: 150px;
+  padding: 6px 8px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(217, 75, 61, 0.2);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 10px 22px rgba(21, 25, 30, 0.14);
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.empty-alert-tooltip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  border-right: 1px solid rgba(217, 75, 61, 0.2);
+  border-bottom: 1px solid rgba(217, 75, 61, 0.2);
+  background: #fff;
+}
+
+.empty-alert:hover .empty-alert-tooltip {
+  display: inline-flex;
 }
 
 .garage-badge-stack {
   position: absolute;
-  top: 4px;
-  left: 5px;
-  max-width: calc(100% - 10px);
+  top: 0;
+  left: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 3px;
+  justify-content: flex-start;
+  gap: 0;
+  max-width: calc(100% - 8px);
 }
 
 .garage-badge {
   display: inline-flex;
-  max-width: 44px;
-  padding: 1px 5px;
-  border-radius: 999px;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  max-width: 54px;
+  padding: 2px 7px 3px;
+  border-radius: 0 0 7px 0;
   overflow: hidden;
-  background: rgba(255, 184, 0, 0.88);
+  border: 0;
+  border-right: 1px solid rgba(21, 25, 30, 0.14);
+  border-bottom: 1px solid rgba(21, 25, 30, 0.14);
+  background: rgba(255, 184, 0, 0.94);
+  box-shadow: 0 3px 7px rgba(21, 25, 30, 0.09);
   color: var(--ink);
   font-size: 0.62rem;
   font-weight: 800;
@@ -958,12 +1067,23 @@ td[class^="cell-"] {
   white-space: nowrap;
 }
 
+.garage-badge + .garage-badge {
+  border-radius: 0 0 7px 0;
+}
+
 .camera-stack {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
   gap: 4px;
   margin-top: 7px;
+}
+
+td[class^="cell-"] .camera-stack {
+  display: grid;
+  grid-template-columns: max-content;
+  gap: 4px;
+  justify-items: center;
 }
 
 .camera-grid {
@@ -979,12 +1099,26 @@ td[class^="cell-"] {
   max-width: 100%;
   padding: 2px 7px;
   border-radius: 999px;
-  overflow: hidden;
+  overflow: visible;
   background: rgba(17, 24, 32, 0.08);
   color: #26323d;
   font-size: 0.74rem;
   line-height: 1.2;
   text-overflow: ellipsis;
+}
+
+.camera-count-chip {
+  display: grid;
+  grid-template-columns: 52px 36px;
+  gap: 2px;
+  justify-content: start;
+  text-align: left;
+}
+
+.camera-count-chip b {
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .camera-total-stack {
