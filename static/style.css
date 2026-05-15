@@ -1,18 +1,18 @@
 :root {
-  --bg: #f6f7f4;
+  --bg: #eef1f4;
   --surface: #ffffff;
-  --surface-soft: #eef3ef;
-  --line: #d9e0d9;
-  --line-strong: #c7d2ca;
-  --text: #17201b;
-  --muted: #66736b;
-  --teal: #1f6f68;
-  --ink: #263943;
-  --coral: #c96445;
-  --gold: #c49a3f;
-  --green: #4d8a5f;
-  --danger: #c75146;
-  --shadow: 0 20px 55px rgba(35, 50, 44, 0.11);
+  --surface-soft: #f3f5f6;
+  --line: #d9dee3;
+  --line-strong: #c3cbd3;
+  --text: #111820;
+  --muted: #66717c;
+  --teal: #ffb800;
+  --ink: #15191e;
+  --coral: #ffca45;
+  --gold: #ffb800;
+  --green: #17b26a;
+  --danger: #d94b3d;
+  --shadow: 0 24px 60px rgba(12, 18, 24, 0.14);
   --radius: 8px;
   --font-sans: "Segoe UI", Arial, sans-serif;
   --filters-height: 82px;
@@ -27,28 +27,45 @@ body {
   font-family: var(--font-sans);
   color: var(--text);
   background:
-    linear-gradient(180deg, #fbfcfa 0%, var(--bg) 48%, #edf2ef 100%);
+    radial-gradient(circle at 78% 0%, rgba(255, 184, 0, 0.18), transparent 24rem),
+    linear-gradient(180deg, #11171d 0, #151b22 185px, var(--bg) 185px, #f7f8f9 100%);
 }
 
 .page-shell {
   width: min(1480px, calc(100% - 32px));
-  margin: 22px auto 36px;
+  margin: 0 auto 36px;
+  padding-top: 22px;
 }
 
 .page-header {
   display: flex;
   align-items: end;
   justify-content: space-between;
-  margin-bottom: 14px;
-  padding: 0 2px;
+  margin-bottom: 18px;
+  padding: 8px 2px 0;
 }
 
 .page-header h1 {
-  margin: 0;
+  margin: 12px 0 0;
   font-size: clamp(2rem, 4vw, 4.6rem);
   font-weight: 750;
   line-height: 0.95;
-  color: var(--ink);
+  color: #fff;
+}
+
+.brand-lockup {
+  display: inline-flex;
+  align-items: center;
+  width: min(220px, 54vw);
+  min-height: 34px;
+}
+
+.brand-lockup img {
+  display: block;
+  width: 100%;
+  max-height: 44px;
+  object-fit: contain;
+  object-position: left center;
 }
 
 .filters-bar {
@@ -60,10 +77,10 @@ body {
   gap: 10px;
   align-items: end;
   padding: 12px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(255, 184, 0, 0.28);
   border-radius: var(--radius);
-  box-shadow: 0 12px 35px rgba(38, 57, 67, 0.08);
+  box-shadow: 0 16px 42px rgba(7, 12, 18, 0.18);
   backdrop-filter: blur(14px);
 }
 
@@ -105,7 +122,7 @@ select {
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   color: var(--text);
-  background: #fbfcfb;
+  background: #fbfcfd;
   outline: 0;
 }
 
@@ -120,8 +137,8 @@ select[multiple] option {
 }
 
 select[multiple] option:checked {
-  background: var(--teal);
-  color: #fff;
+  background: var(--gold);
+  color: var(--ink);
 }
 
 .multi-picker {
@@ -154,8 +171,8 @@ select[multiple] option:checked {
 }
 
 .multi-picker-button[aria-expanded="true"] {
-  border-color: var(--teal);
-  box-shadow: 0 0 0 3px rgba(31, 111, 104, 0.14);
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 184, 0, 0.18);
 }
 
 .multi-picker-menu {
@@ -200,7 +217,7 @@ select[multiple] option:checked {
 
 .multi-picker-option:hover,
 .multi-picker-option[aria-pressed="true"] {
-  background: var(--surface-soft);
+  background: rgba(255, 184, 0, 0.14);
 }
 
 .multi-picker-check {
@@ -217,8 +234,9 @@ select[multiple] option:checked {
 }
 
 .multi-picker-option[aria-pressed="true"] .multi-picker-check {
-  border-color: var(--teal);
-  background: var(--teal);
+  border-color: var(--gold);
+  background: var(--gold);
+  color: var(--ink);
 }
 
 .multi-picker-empty {
@@ -229,8 +247,8 @@ select[multiple] option:checked {
 
 input:focus,
 select:focus {
-  border-color: var(--teal);
-  box-shadow: 0 0 0 3px rgba(31, 111, 104, 0.14);
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(255, 184, 0, 0.18);
 }
 
 button {
@@ -243,16 +261,17 @@ button {
 }
 
 button.ghost {
-  background: var(--ink);
-  color: #fff;
+  background: var(--gold);
+  color: var(--ink);
   font-weight: 700;
   justify-self: start;
   min-width: 108px;
   padding: 0 12px;
+  box-shadow: 0 10px 22px rgba(255, 184, 0, 0.2);
 }
 
 button.ghost:hover {
-  background: var(--teal);
+  background: #ffca2f;
 }
 
 .summary-grid {
@@ -309,10 +328,12 @@ button.ghost:hover {
 
 .garage-status-card.online strong::before {
   background: var(--green);
+  box-shadow: 0 0 0 3px rgba(23, 178, 106, 0.14);
 }
 
 .garage-status-card.syncing strong::before {
   background: var(--green);
+  box-shadow: 0 0 0 3px rgba(23, 178, 106, 0.14);
 }
 
 .sync-tooltip {
@@ -346,8 +367,8 @@ button.ghost:hover {
   width: 12px;
   height: 12px;
   flex: 0 0 auto;
-  border: 2px solid rgba(31, 141, 102, 0.2);
-  border-top-color: var(--green);
+  border: 2px solid rgba(255, 184, 0, 0.24);
+  border-top-color: var(--gold);
   border-radius: 999px;
   animation: sync-spin 0.8s linear infinite;
 }
@@ -360,7 +381,7 @@ button.ghost:hover {
 
 .summary-card,
 .panel {
-  background: rgba(255, 255, 255, 0.94);
+  background: rgba(255, 255, 255, 0.96);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
@@ -383,9 +404,9 @@ button.ghost:hover {
   font-size: 0.85rem;
   font-weight: 800;
   text-decoration: none;
-  border: 1px solid var(--line);
+  border: 1px solid var(--gold);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--gold);
 }
 
 .config-actions {
@@ -408,11 +429,11 @@ button.ghost:hover {
 .config-actions button {
   min-height: 38px;
   padding: 0 14px;
-  color: #fff;
+  color: var(--ink);
   font-weight: 800;
   border: 0;
   border-radius: 7px;
-  background: var(--ink);
+  background: var(--gold);
 }
 
 .config-actions button:disabled {
@@ -477,7 +498,7 @@ button.ghost:hover {
   gap: 10px;
   align-items: end;
   padding: 10px;
-  border: 1px solid var(--line);
+  border: 1px solid #e3e8ee;
   border-radius: 7px;
   background: rgba(247, 249, 247, 0.9);
 }
@@ -503,8 +524,8 @@ button.ghost:hover {
 .remote-add {
   justify-self: start;
   color: var(--ink);
-  border: 1px solid var(--line-strong);
-  background: #fff;
+  border: 1px solid var(--gold);
+  background: var(--gold);
 }
 
 .remote-remove {
@@ -580,11 +601,11 @@ button.ghost:hover {
   position: absolute;
   inset: 0 0 auto;
   height: 3px;
-  background: linear-gradient(90deg, var(--teal), var(--coral), var(--gold), var(--green));
+  background: linear-gradient(90deg, var(--gold), #ffe08a, var(--gold));
 }
 
 .summary-card.alert-summary-card::before {
-  background: linear-gradient(90deg, var(--danger), var(--coral), var(--gold));
+  background: linear-gradient(90deg, var(--danger), var(--gold));
 }
 
 .summary-title {
@@ -734,7 +755,7 @@ button.ghost:hover {
 }
 
 .panel-label {
-  color: var(--teal);
+  color: #a87900;
 }
 
 .daily-overview {
@@ -755,7 +776,7 @@ button.ghost:hover {
 }
 
 .day-card {
-  border-top: 3px solid var(--teal);
+  border-top: 3px solid var(--gold);
 }
 
 .day-card span {
@@ -839,8 +860,8 @@ thead th {
   position: sticky;
   top: 0;
   z-index: 12;
-  color: var(--ink);
-  background: #e9efea;
+  color: #fff;
+  background: var(--ink);
   box-shadow: 0 1px 0 var(--line);
 }
 
@@ -882,25 +903,25 @@ td.vehicle-column {
 thead th.sticky,
 thead th.sticky-2 {
   z-index: 13;
-  background: #e9efea;
+  background: var(--ink);
 }
 
 .cell-none {
-  background: rgba(199, 81, 70, 0.1);
+  background: rgba(217, 75, 61, 0.1);
   color: #9c3c34;
 }
 
 .cell-low {
-  background: rgba(196, 154, 63, 0.26);
+  background: rgba(255, 184, 0, 0.22);
 }
 
 .cell-medium {
-  background: rgba(77, 138, 95, 0.25);
+  background: rgba(23, 178, 106, 0.2);
 }
 
 .cell-high {
-  background: rgba(31, 111, 104, 0.31);
-  color: #153d38;
+  background: rgba(23, 178, 106, 0.34);
+  color: #0f3d29;
 }
 
 .day-total {
@@ -927,8 +948,8 @@ td[class^="cell-"] {
   padding: 1px 5px;
   border-radius: 999px;
   overflow: hidden;
-  background: rgba(38, 57, 67, 0.14);
-  color: #24363f;
+  background: rgba(255, 184, 0, 0.88);
+  color: var(--ink);
   font-size: 0.62rem;
   font-weight: 800;
   line-height: 1.35;
@@ -959,8 +980,8 @@ td[class^="cell-"] {
   padding: 2px 7px;
   border-radius: 999px;
   overflow: hidden;
-  background: rgba(38, 57, 67, 0.09);
-  color: #304650;
+  background: rgba(17, 24, 32, 0.08);
+  color: #26323d;
   font-size: 0.74rem;
   line-height: 1.2;
   text-overflow: ellipsis;

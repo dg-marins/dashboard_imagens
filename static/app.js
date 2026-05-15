@@ -25,7 +25,7 @@ let scanPollTimer = null;
 let dashboardRequestId = 0;
 let dashboardRefreshTimer = null;
 let dashboardLoading = false;
-const DASHBOARD_REFRESH_INTERVAL_MS = 20000;
+const DASHBOARD_REFRESH_INTERVAL_MS = 10000;
 
 function updateStickyOffsets() {
   if (!filtersBar) return;
