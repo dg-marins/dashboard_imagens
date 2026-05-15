@@ -8,7 +8,10 @@ import traceback
 import shutil
 import time
 import calendar
+import zipfile
+from io import BytesIO
 from datetime import date, datetime, timedelta
+from html import escape as xml_escape
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +40,7 @@ from config import (
     DURATION_INTERVAL_SECONDS,
     DURATION_UPDATE_BATCH_SIZE,
     ENABLE_VIDEO_DURATION,
+    EXPORT_XLSX_ENABLED,
     FFPROBE_BINARY,
     FFPROBE_TIMEOUT_SECONDS,
     HOST,
@@ -155,6 +159,7 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_ALERT_DAYS_WITHOUT_FILES", "global": "ALERT_DAYS_WITHOUT_FILES", "type": "int", "group": "Relatorio", "label": "Dias para alerta", "live": True},
     {"name": "IMAGE_DASHBOARD_TOP_ROWS_LIMIT", "global": "TOP_ROWS_LIMIT", "type": "int", "group": "Relatorio", "label": "Limite de destaques", "live": True},
     {"name": "IMAGE_DASHBOARD_CACHE_SECONDS", "global": "DASHBOARD_CACHE_SECONDS", "type": "int", "group": "Relatorio", "label": "Cache do dashboard (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_EXPORT_XLSX_ENABLED", "global": "EXPORT_XLSX_ENABLED", "type": "bool", "group": "Relatorio", "label": "Habilitar exportacao XLSX", "live": True},
     {"name": "IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "global": "SQLITE_TIMEOUT_SECONDS", "type": "int", "group": "SQLite", "label": "Timeout SQLite (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "global": "SQLITE_JOURNAL_MODE", "type": "str", "group": "SQLite", "label": "Journal mode", "live": True},
     {"name": "IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "global": "SQLITE_SYNCHRONOUS", "type": "str", "group": "SQLite", "label": "Synchronous", "live": True},
@@ -1504,6 +1509,216 @@ def build_export_payload(query: Dict[str, List[str]]) -> dict:
     }
 
 
+def parse_report_date(query: Dict[str, List[str]]) -> str:
+    selected_date = query.get("date", [date.today().isoformat()])[0]
+    if not DATE_DIR_PATTERN.match(selected_date):
+        raise ValueError("Data invalida para exportacao.")
+    return selected_date
+
+
+def report_status_for_count(total_files: int) -> str:
+    if total_files == 0:
+        return "inoperante"
+    if total_files <= 400:
+        return "descarregamento parcial"
+    return "funcionando"
+
+
+def build_daily_export_rows(selected_date: str) -> List[List[object]]:
+    ensure_database()
+    with open_db() as connection:
+        inventory_rows = connection.execute(
+            """
+            SELECT vehicle, garage
+            FROM camera_inventory
+            ORDER BY vehicle, garage
+            """
+        ).fetchall()
+        day_rows = connection.execute(
+            """
+            SELECT vehicle, garage, SUM(total_files) AS total_files
+            FROM vehicle_camera_day_summary
+            WHERE capture_date = ?
+            GROUP BY vehicle, garage
+            ORDER BY vehicle, garage
+            """,
+            (selected_date,),
+        ).fetchall()
+        if not day_rows:
+            day_rows = connection.execute(
+                """
+                SELECT vehicle, garage, COUNT(*) AS total_files
+                FROM indexed_files
+                WHERE capture_date = ?
+                GROUP BY vehicle, garage
+                ORDER BY vehicle, garage
+                """,
+                (selected_date,),
+            ).fetchall()
+
+    vehicle_garages: Dict[str, set] = {}
+    for row in inventory_rows:
+        vehicle_garages.setdefault(row["vehicle"], set()).add(row["garage"])
+
+    vehicle_day_totals: Dict[str, int] = {}
+    vehicle_day_garages: Dict[str, set] = {}
+    for row in day_rows:
+        vehicle = row["vehicle"]
+        total_files = int(row["total_files"] or 0)
+        vehicle_day_totals[vehicle] = vehicle_day_totals.get(vehicle, 0) + total_files
+        if total_files > 0:
+            vehicle_day_garages.setdefault(vehicle, set()).add(row["garage"])
+        vehicle_garages.setdefault(vehicle, set()).add(row["garage"])
+
+    parsed_date = datetime.strptime(selected_date, "%Y-%m-%d").date()
+    display_date = f"{parsed_date.day}/{parsed_date.month}/{parsed_date.year}"
+    vehicles = sorted(vehicle_garages.keys(), key=vehicle_sort_key)
+    rows: List[List[object]] = []
+    for vehicle in vehicles:
+        total_files = vehicle_day_totals.get(vehicle, 0)
+        garages = vehicle_day_garages.get(vehicle) or vehicle_garages.get(vehicle, set())
+        rows.append(
+            [
+                vehicle,
+                report_status_for_count(total_files),
+                display_date,
+                parsed_date.month,
+                parsed_date.year,
+                parsed_date.day,
+                "",
+                "/".join(sorted(garages, key=vehicle_sort_key)),
+            ]
+        )
+    return rows
+
+
+def xlsx_col_name(index: int) -> str:
+    name = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def xlsx_style_for_cell(row_index: int, col_index: int) -> int:
+    if row_index == 1:
+        return 1
+    if 4 <= col_index <= 6:
+        return 2
+    return 3
+
+
+def xlsx_cell(value: object, row_index: int, col_index: int) -> str:
+    cell_ref = f"{xlsx_col_name(col_index)}{row_index}"
+    style_id = xlsx_style_for_cell(row_index, col_index)
+    if isinstance(value, int):
+        return f'<c r="{cell_ref}" s="{style_id}"><v>{value}</v></c>'
+    text = xml_escape(str(value or ""))
+    return f'<c r="{cell_ref}" s="{style_id}" t="inlineStr"><is><t>{text}</t></is></c>'
+
+
+def build_xlsx_workbook(headers: List[str], rows: List[List[object]], sheet_name: str = "Relatorio") -> bytes:
+    all_rows = [headers, *rows]
+    sheet_rows = []
+    for row_index, row_values in enumerate(all_rows, start=1):
+        cells = "".join(
+            xlsx_cell(value, row_index, col_index)
+            for col_index, value in enumerate(row_values, start=1)
+        )
+        sheet_rows.append(f'<row r="{row_index}">{cells}</row>')
+
+    worksheet = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:H{len(all_rows)}"/>
+  <sheetViews><sheetView workbookViewId="0"/></sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  <cols>
+    <col min="1" max="1" width="13" customWidth="1"/>
+    <col min="2" max="2" width="28" customWidth="1"/>
+    <col min="3" max="3" width="14" customWidth="1"/>
+    <col min="4" max="6" width="9" customWidth="1"/>
+    <col min="7" max="7" width="12" customWidth="1"/>
+    <col min="8" max="8" width="13" customWidth="1"/>
+  </cols>
+  <sheetData>{''.join(sheet_rows)}</sheetData>
+</worksheet>"""
+    workbook = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="{xml_escape(sheet_name)}" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"""
+    workbook_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"""
+    styles = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="2">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="3">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFB6D7A8"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FF000000"/></left>
+      <right style="thin"><color rgb="FF000000"/></right>
+      <top style="thin"><color rgb="FF000000"/></top>
+      <bottom style="thin"><color rgb="FF000000"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellStyleXfs>
+  <cellXfs count="4">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="2" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+  </cellXfs>
+  <cellStyles count="1">
+    <cellStyle name="Normal" xfId="0" builtinId="0"/>
+  </cellStyles>
+</styleSheet>"""
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"""
+
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        archive.writestr("xl/styles.xml", styles)
+        archive.writestr("xl/worksheets/sheet1.xml", worksheet)
+    return output.getvalue()
+
+
+def build_daily_xlsx_export(query: Dict[str, List[str]]) -> Tuple[str, bytes]:
+    if not EXPORT_XLSX_ENABLED:
+        raise PermissionError("Exportacao XLSX desabilitada.")
+    selected_date = parse_report_date(query)
+    headers = ["Carro", "Status", "Data", "Mes", "Ano", "Dia", "", "Garagem"]
+    rows = build_daily_export_rows(selected_date)
+    filename = f"relatorio_cores_{selected_date}.xlsx"
+    return filename, build_xlsx_workbook(headers, rows)
+
+
 def fetch_remote_json(base_url: str, path: str, query: Optional[Dict[str, str]] = None) -> dict:
     url = f"{base_url}{path}"
     if query:
@@ -2427,6 +2642,9 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
             "vehicles": [row["vehicle"] for row in vehicles],
             "cameras": [row["camera"] for row in cameras],
         },
+        "features": {
+            "export_xlsx_enabled": EXPORT_XLSX_ENABLED,
+        },
         "garage_status": get_garage_statuses(available_garage_names, metadata.get("last_scan_finished_at")),
         "scan_info": {
             "last_scan_started_at": metadata.get("last_scan_started_at"),
@@ -2562,6 +2780,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/export":
                 query = parse_qs(parsed.query)
                 return self.serve_json(build_export_payload(query))
+            if parsed.path == "/api/export-xlsx":
+                query = parse_qs(parsed.query)
+                try:
+                    filename, body = build_daily_xlsx_export(query)
+                except PermissionError as exc:
+                    return self.serve_json({"status": "error", "message": str(exc)}, status_code=HTTPStatus.FORBIDDEN)
+                except ValueError as exc:
+                    return self.serve_json({"status": "error", "message": str(exc)}, status_code=HTTPStatus.BAD_REQUEST)
+                return self.serve_bytes(
+                    body,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    filename=filename,
+                )
             if parsed.path == "/api/remote-sync":
                 query = parse_qs(parsed.query)
                 full_sync = query.get("full", ["0"])[0] == "1" or query.get("mode", ["recent"])[0] in {"full", "historico"}
@@ -2673,9 +2904,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         body = file_path.read_bytes()
+        self.serve_bytes(body, content_type)
+
+    def serve_bytes(self, body: bytes, content_type: str, filename: Optional[str] = None) -> None:
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
         self.wfile.write(body)
 

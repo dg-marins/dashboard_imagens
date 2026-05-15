@@ -755,6 +755,43 @@ button.ghost:hover {
   color: var(--ink);
 }
 
+.export-xlsx-box {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.export-xlsx-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-xlsx-box.hidden,
+.export-xlsx-form.hidden {
+  display: none;
+}
+
+.export-xlsx-form input {
+  height: 38px;
+  min-width: 150px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+
+.export-xlsx-box > button,
+.export-xlsx-form button {
+  background: var(--gold);
+  color: var(--ink);
+  font-weight: 800;
+  box-shadow: 0 10px 22px rgba(255, 184, 0, 0.2);
+}
+
 .panel-label {
   color: #a87900;
 }
@@ -1217,6 +1254,12 @@ td[class^="cell-"] .camera-stack {
   .panel-header {
     align-items: start;
     flex-direction: column;
+  }
+
+  .export-xlsx-box,
+  .export-xlsx-form {
+    width: 100%;
+    flex-wrap: wrap;
   }
 
   th.sticky-2,

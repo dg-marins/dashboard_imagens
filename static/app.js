@@ -15,6 +15,10 @@ const dailyOverview = document.getElementById("dailyOverview");
 const matrixTable = document.getElementById("matrixTable");
 const statusMessage = document.getElementById("statusMessage");
 const summaryCardTemplate = document.getElementById("summaryCardTemplate");
+const exportXlsxBox = document.getElementById("exportXlsxBox");
+const openExportXlsxButton = document.getElementById("openExportXlsx");
+const exportXlsxForm = document.getElementById("exportXlsxForm");
+const exportDateInput = document.getElementById("exportDate");
 
 const monthNames = [
   "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -173,6 +177,14 @@ function fillDateFilters() {
     if (year === now.getFullYear()) option.selected = true;
     yearSelect.appendChild(option);
   }
+}
+
+function todayInputValue() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function selectedValues(select) {
@@ -678,6 +690,19 @@ function renderFilterOptions(filters) {
   if (keepCameraOpen) cameraPickerApi.reopen();
 }
 
+function renderFeatures(features = {}) {
+  if (!exportXlsxBox) return;
+  const enabled = Boolean(features.export_xlsx_enabled);
+  exportXlsxBox.classList.toggle("hidden", !enabled);
+  if (!enabled) {
+    exportXlsxForm?.classList.add("hidden");
+    openExportXlsxButton?.classList.remove("hidden");
+  }
+  if (enabled && exportDateInput && !exportDateInput.value) {
+    exportDateInput.value = todayInputValue();
+  }
+}
+
 async function loadDashboard(options = {}) {
   const { showLoading = true, animateAll = true, animateChanges = false } = options;
   if (dashboardLoading && !showLoading) {
@@ -713,6 +738,7 @@ async function loadDashboard(options = {}) {
     renderGarageStatus(data.garage_status);
     renderDaily(data.daily_overview);
     renderMatrix(data.dates, data.rows, data.summary.fleet_total);
+    renderFeatures(data.features);
     setSectionLoading(false);
     if (animateChanges && previousValues) {
       markChangedValues(previousValues);
@@ -777,6 +803,23 @@ function resetFilters() {
 monthSelect.addEventListener("change", loadDashboard);
 yearSelect.addEventListener("change", loadDashboard);
 resetButton.addEventListener("click", resetFilters);
+if (openExportXlsxButton) {
+  openExportXlsxButton.addEventListener("click", () => {
+    if (!exportDateInput.value) exportDateInput.value = todayInputValue();
+    openExportXlsxButton.classList.add("hidden");
+    exportXlsxForm.classList.remove("hidden");
+    exportDateInput.focus();
+  });
+}
+if (exportXlsxForm) {
+  exportXlsxForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const selectedDate = exportDateInput?.value || todayInputValue();
+    window.location.href = `/api/export-xlsx?date=${encodeURIComponent(selectedDate)}`;
+    exportXlsxForm.classList.add("hidden");
+    openExportXlsxButton?.classList.remove("hidden");
+  });
+}
 
 window.addEventListener("beforeunload", () => {
   stopScanPolling();
@@ -790,6 +833,7 @@ if (window.ResizeObserver && filtersBar) {
 
 updateStickyOffsets();
 fillDateFilters();
+if (exportDateInput) exportDateInput.value = todayInputValue();
 syncScanStatus();
 loadDashboard();
 startDashboardAutoRefresh();
