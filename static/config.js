@@ -144,13 +144,44 @@ function inputForField(field) {
     `;
   }
 
+  if (field.type === "select") {
+    const options = field.options || [];
+    return `
+      <select id="${id}" name="${field.name}">
+        ${options.map((option) => `
+          <option value="${escapeHtml(option.value)}" ${field.value === option.value ? "selected" : ""}>
+            ${escapeHtml(option.label || option.value)}
+          </option>
+        `).join("")}
+      </select>
+    `;
+  }
+
   const rows = field.value.length > 80 || field.name === "IMAGE_DASHBOARD_REMOTE_GARAGES" ? 3 : 1;
   if (rows > 1) {
     return `<textarea id="${id}" name="${field.name}" rows="${rows}">${field.value}</textarea>`;
   }
 
-  const type = field.type === "int" ? "number" : "text";
+  const type = field.type === "int" ? "number" : (field.type === "password" ? "password" : "text");
   return `<input id="${id}" name="${field.name}" type="${type}" value="${field.value}">`;
+}
+
+function fieldDependencyAttrs(field) {
+  const dependsOn = field.depends_on || {};
+  const entries = Object.entries(dependsOn);
+  if (!entries.length) return "";
+  const [dependencyName, dependencyValue] = entries[0];
+  return ` data-depends-on="${escapeHtml(dependencyName)}" data-depends-value="${escapeHtml(dependencyValue)}"`;
+}
+
+function applyFieldVisibility() {
+  configForm.querySelectorAll("[data-depends-on]").forEach((fieldBox) => {
+    const dependencyName = fieldBox.dataset.dependsOn;
+    const expectedValue = fieldBox.dataset.dependsValue;
+    const dependency = configForm.elements[dependencyName];
+    const currentValue = dependency?.value || "";
+    fieldBox.classList.toggle("hidden", currentValue !== expectedValue);
+  });
 }
 
 function renderConfig(fields) {
@@ -164,7 +195,7 @@ function renderConfig(fields) {
       </div>
       <div class="config-grid">
         ${groupFieldsList.map((field) => `
-          <div class="config-field ${field.name === "IMAGE_DASHBOARD_REMOTE_GARAGES" ? "config-field-wide" : ""}">
+          <div class="config-field ${field.name === "IMAGE_DASHBOARD_REMOTE_GARAGES" ? "config-field-wide" : ""}"${fieldDependencyAttrs(field)}>
             <span>${field.label}</span>
             ${inputForField(field)}
             ${field.live ? "" : '<small>Exige reinicio da aplicacao</small>'}
@@ -175,6 +206,8 @@ function renderConfig(fields) {
   `).join("");
 
   document.querySelectorAll("[data-remote-editor]").forEach(setupRemoteGaragesField);
+  configForm.onchange = applyFieldVisibility;
+  applyFieldVisibility();
 }
 
 async function loadConfig() {

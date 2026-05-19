@@ -9,6 +9,8 @@ import shutil
 import time
 import calendar
 import zipfile
+import logging
+from decimal import Decimal
 from io import BytesIO
 from datetime import date, datetime, timedelta
 from html import escape as xml_escape
@@ -38,6 +40,7 @@ from config import (
     DASHBOARD_CACHE_SECONDS,
     DAY_LEVELS,
     DURATION_INTERVAL_SECONDS,
+    DURATION_MAX_FILES_PER_RUN,
     DURATION_UPDATE_BATCH_SIZE,
     ENABLE_VIDEO_DURATION,
     EXPORT_XLSX_ENABLED,
@@ -48,11 +51,22 @@ from config import (
     INDEX_CAMERA_BATCH_SIZE,
     INDEX_FILE_BATCH_SIZE,
     LOCAL_GARAGE,
+    MYSQL_DB,
+    MYSQL_HOST,
+    MYSQL_PASSWORD,
+    MYSQL_PORT,
+    MYSQL_USER,
     PORT,
+    POSTGRES_DB,
     POSTGRES_DSN,
+    POSTGRES_HOST,
+    POSTGRES_PASSWORD,
+    POSTGRES_PORT,
+    POSTGRES_USER,
     REMOTE_EXPORT_BATCH_SIZE,
     REMOTE_FULL_SYNC_DAYS,
     REMOTE_FULL_SYNC_INTERVAL_SECONDS,
+    REMOTE_REBUILD_SUMMARY_EACH_PAGE,
     REMOTE_GARAGES,
     REMOTE_HEALTH_INTERVAL_SECONDS,
     REMOTE_REQUEST_TIMEOUT_SECONDS,
@@ -60,6 +74,7 @@ from config import (
     REMOTE_SYNC_INTERVAL_SECONDS,
     SCAN_INTERVAL_SECONDS,
     SCAN_PROGRESS_EVERY_FILES,
+    SCAN_SORT_ENTRIES,
     SQLITE_BUSY_TIMEOUT_MS,
     SQLITE_CACHE_SIZE,
     SQLITE_JOURNAL_MODE,
@@ -75,6 +90,14 @@ from config import (
 
 DATE_DIR_PATTERN = re.compile(DATE_DIR_REGEX)
 TIMESTAMP_FILE_PATTERN = re.compile(TIMESTAMP_FILE_REGEX)
+LOG_DIR = Path("logs")
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+logging.basicConfig(
+    filename=str(LOG_DIR / "app.log"),
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+LOGGER = logging.getLogger("dashboard_imagens")
 
 SCAN_LOCK = threading.Lock()
 SCAN_STATE = {
@@ -129,19 +152,42 @@ DASHBOARD_CACHE: Dict[str, Tuple[float, dict]] = {}
 CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_ROOT", "global": "IMAGE_ROOT", "type": "path", "group": "Arquivos", "label": "Diretorio de imagens", "live": True},
     {"name": "IMAGE_DASHBOARD_GARAGE", "global": "LOCAL_GARAGE", "type": "str", "group": "Arquivos", "label": "Garagem local", "live": True},
-    {"name": "IMAGE_DASHBOARD_DB_ENGINE", "global": "DB_ENGINE", "type": "str", "group": "Banco", "label": "Banco (sqlite/postgres)", "live": False},
-    {"name": "IMAGE_DASHBOARD_DB", "global": "DB_PATH", "type": "path", "group": "Banco", "label": "Arquivo SQLite", "live": False},
-    {"name": "IMAGE_DASHBOARD_POSTGRES_DSN", "global": "POSTGRES_DSN", "type": "str", "group": "Banco", "label": "Postgres DSN", "live": False},
+    {
+        "name": "IMAGE_DASHBOARD_DB_ENGINE",
+        "global": "DB_ENGINE",
+        "type": "select",
+        "group": "Banco",
+        "label": "Banco de dados",
+        "live": False,
+        "options": [
+            {"value": "sqlite", "label": "SQLite"},
+            {"value": "postgres", "label": "PostgreSQL"},
+            {"value": "mysql", "label": "MySQL (a implementar)"},
+        ],
+    },
+    {"name": "IMAGE_DASHBOARD_DB", "global": "DB_PATH", "type": "path", "group": "Banco", "label": "Arquivo SQLite", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_POSTGRES_HOST", "global": "POSTGRES_HOST", "type": "str", "group": "Banco", "label": "PostgreSQL IP/host", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "postgres"}},
+    {"name": "IMAGE_DASHBOARD_POSTGRES_PORT", "global": "POSTGRES_PORT", "type": "int", "group": "Banco", "label": "PostgreSQL porta", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "postgres"}},
+    {"name": "IMAGE_DASHBOARD_POSTGRES_DB", "global": "POSTGRES_DB", "type": "str", "group": "Banco", "label": "PostgreSQL banco", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "postgres"}},
+    {"name": "IMAGE_DASHBOARD_POSTGRES_USER", "global": "POSTGRES_USER", "type": "str", "group": "Banco", "label": "PostgreSQL usuario", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "postgres"}},
+    {"name": "IMAGE_DASHBOARD_POSTGRES_PASSWORD", "global": "POSTGRES_PASSWORD", "type": "password", "group": "Banco", "label": "PostgreSQL senha", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "postgres"}},
+    {"name": "IMAGE_DASHBOARD_MYSQL_HOST", "global": "MYSQL_HOST", "type": "str", "group": "Banco", "label": "MySQL IP/host", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "mysql"}},
+    {"name": "IMAGE_DASHBOARD_MYSQL_PORT", "global": "MYSQL_PORT", "type": "int", "group": "Banco", "label": "MySQL porta", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "mysql"}},
+    {"name": "IMAGE_DASHBOARD_MYSQL_DB", "global": "MYSQL_DB", "type": "str", "group": "Banco", "label": "MySQL banco", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "mysql"}},
+    {"name": "IMAGE_DASHBOARD_MYSQL_USER", "global": "MYSQL_USER", "type": "str", "group": "Banco", "label": "MySQL usuario", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "mysql"}},
+    {"name": "IMAGE_DASHBOARD_MYSQL_PASSWORD", "global": "MYSQL_PASSWORD", "type": "password", "group": "Banco", "label": "MySQL senha", "live": False, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "mysql"}},
     {"name": "IMAGE_DASHBOARD_HOST", "global": "HOST", "type": "str", "group": "Servidor", "label": "Host", "live": False},
     {"name": "IMAGE_DASHBOARD_PORT", "global": "PORT", "type": "int", "group": "Servidor", "label": "Porta", "live": False},
     {"name": "IMAGE_DASHBOARD_AUTO_SCAN", "global": "AUTO_SCAN_ON_START", "type": "bool", "group": "Indexacao", "label": "Indexar ao iniciar", "live": True},
     {"name": "IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS", "global": "SCAN_INTERVAL_SECONDS", "type": "int", "group": "Indexacao", "label": "Intervalo de indexacao (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_SCAN_SORT_ENTRIES", "global": "SCAN_SORT_ENTRIES", "type": "bool", "group": "Indexacao", "label": "Ordenar arquivos na varredura", "live": True},
     {"name": "IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "global": "INDEX_FILE_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de arquivos", "live": True},
     {"name": "IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "global": "INDEX_CAMERA_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de cameras", "live": True},
     {"name": "IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "global": "SCAN_PROGRESS_EVERY_FILES", "type": "int", "group": "Indexacao", "label": "Atualizar progresso a cada N arquivos", "live": True},
     {"name": "IMAGE_DASHBOARD_ENABLE_DURATION", "global": "ENABLE_VIDEO_DURATION", "type": "bool", "group": "Videos", "label": "Coletar duracao", "live": True},
     {"name": "IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "global": "DURATION_INTERVAL_SECONDS", "type": "int", "group": "Videos", "label": "Intervalo da fila de duracao (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_DURATION_UPDATE_BATCH_SIZE", "global": "DURATION_UPDATE_BATCH_SIZE", "type": "int", "group": "Videos", "label": "Lote de duracoes", "live": True},
+    {"name": "IMAGE_DASHBOARD_DURATION_MAX_FILES_PER_RUN", "global": "DURATION_MAX_FILES_PER_RUN", "type": "int", "group": "Videos", "label": "Maximo de videos por rodada", "live": True},
     {"name": "IMAGE_DASHBOARD_VIDEO_EXTENSIONS", "global": "VIDEO_EXTENSIONS", "type": "csv_set", "group": "Videos", "label": "Extensoes de video", "live": True},
     {"name": "IMAGE_DASHBOARD_FFPROBE_BINARY", "global": "FFPROBE_BINARY", "type": "str", "group": "Videos", "label": "Binario ffprobe", "live": True},
     {"name": "IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "global": "FFPROBE_TIMEOUT_SECONDS", "type": "int", "group": "Videos", "label": "Timeout ffprobe (s)", "live": True},
@@ -153,6 +199,7 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS", "global": "REMOTE_FULL_SYNC_DAYS", "type": "int", "group": "Garagens remotas", "label": "Dias da sync historica", "live": True},
     {"name": "IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS", "global": "REMOTE_REQUEST_TIMEOUT_SECONDS", "type": "int", "group": "Garagens remotas", "label": "Timeout remoto (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE", "global": "REMOTE_EXPORT_BATCH_SIZE", "type": "int", "group": "Garagens remotas", "label": "Lote export remoto", "live": True},
+    {"name": "IMAGE_DASHBOARD_REMOTE_REBUILD_SUMMARY_EACH_PAGE", "global": "REMOTE_REBUILD_SUMMARY_EACH_PAGE", "type": "bool", "group": "Garagens remotas", "label": "Atualizar agregados a cada pagina", "live": True},
     {"name": "IMAGE_DASHBOARD_DATE_DIR_REGEX", "global": "DATE_DIR_REGEX", "type": "str", "group": "Padroes", "label": "Regex pasta de data", "live": True},
     {"name": "IMAGE_DASHBOARD_TIMESTAMP_FILE_REGEX", "global": "TIMESTAMP_FILE_REGEX", "type": "str", "group": "Padroes", "label": "Regex arquivo", "live": True},
     {"name": "IMAGE_DASHBOARD_DAY_LEVELS", "global": "DAY_LEVELS", "type": "day_levels", "group": "Relatorio", "label": "Niveis da matriz", "live": True},
@@ -179,6 +226,16 @@ def parse_int(value: str, fallback: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def json_default(value: object) -> object:
+    if isinstance(value, Decimal):
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+    if isinstance(value, Path):
+        return str(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def config_value_to_text(value: object, value_type: str) -> str:
@@ -212,6 +269,12 @@ def parse_config_value(raw_value: object, value_type: str) -> object:
     return text
 
 
+def config_text_value(name: str, fallback: str = "") -> str:
+    if name in config.CONFIG_OVERRIDES:
+        return str(config.CONFIG_OVERRIDES[name]).strip()
+    return os.getenv(name, fallback).strip()
+
+
 def build_config_payload() -> dict:
     fields = []
     for field in CONFIG_FIELDS:
@@ -219,6 +282,8 @@ def build_config_payload() -> dict:
         display_value = config.CONFIG_OVERRIDES.get(field["name"])
         if display_value is None:
             display_value = config_value_to_text(value, field["type"])
+        if field["name"] == "IMAGE_DASHBOARD_DB_ENGINE" and str(display_value).lower() == "postgresql":
+            display_value = "postgres"
         fields.append(
             {
                 "name": field["name"],
@@ -227,6 +292,8 @@ def build_config_payload() -> dict:
                 "type": field["type"],
                 "live": field["live"],
                 "value": str(display_value),
+                "options": field.get("options", []),
+                "depends_on": field.get("depends_on", {}),
             }
         )
     return {
@@ -248,6 +315,30 @@ def update_config_payload(payload: dict) -> dict:
     incoming = payload.get("values") if isinstance(payload, dict) else None
     if not isinstance(incoming, dict):
         raise ValueError("Payload invalido. Envie {'values': {...}}.")
+
+    requested_engine = str(
+        incoming.get(
+            "IMAGE_DASHBOARD_DB_ENGINE",
+            config_text_value("IMAGE_DASHBOARD_DB_ENGINE", DB_ENGINE),
+        )
+    ).strip().lower()
+    if requested_engine == "postgresql":
+        requested_engine = "postgres"
+    if requested_engine not in {"sqlite", "postgres", "mysql"}:
+        raise ValueError("Banco de dados invalido. Use sqlite, postgres ou mysql.")
+    if requested_engine == "mysql":
+        raise ValueError("MySQL ainda nao esta implementado nesta versao. Use SQLite ou PostgreSQL.")
+    if requested_engine == "postgres":
+        postgres_dsn = config_text_value("IMAGE_DASHBOARD_POSTGRES_DSN", POSTGRES_DSN)
+        required_postgres = {
+            "IP/host": incoming.get("IMAGE_DASHBOARD_POSTGRES_HOST", config_text_value("IMAGE_DASHBOARD_POSTGRES_HOST", POSTGRES_HOST)),
+            "Porta": incoming.get("IMAGE_DASHBOARD_POSTGRES_PORT", config_text_value("IMAGE_DASHBOARD_POSTGRES_PORT", str(POSTGRES_PORT))),
+            "Nome do banco": incoming.get("IMAGE_DASHBOARD_POSTGRES_DB", config_text_value("IMAGE_DASHBOARD_POSTGRES_DB", POSTGRES_DB)),
+            "Usuario": incoming.get("IMAGE_DASHBOARD_POSTGRES_USER", config_text_value("IMAGE_DASHBOARD_POSTGRES_USER", POSTGRES_USER)),
+        }
+        missing = [label for label, value in required_postgres.items() if not str(value or "").strip()]
+        if missing and not postgres_dsn:
+            raise ValueError(f"Para usar PostgreSQL, preencha: {', '.join(missing)}.")
 
     current_overrides = dict(config.CONFIG_OVERRIDES)
     applied = []
@@ -402,12 +493,18 @@ def is_postgres() -> bool:
     return DB_ENGINE in {"postgres", "postgresql"}
 
 
+def is_mysql() -> bool:
+    return DB_ENGINE in {"mysql", "mariadb"}
+
+
 def open_db(timeout_seconds: int = SQLITE_TIMEOUT_SECONDS):
+    if is_mysql():
+        raise RuntimeError("MySQL ainda nao esta implementado nesta versao. Configure SQLite ou PostgreSQL.")
     if is_postgres():
         if psycopg2 is None:
             raise RuntimeError("Instale psycopg2-binary para usar PostgreSQL: pip install psycopg2-binary")
         if not POSTGRES_DSN:
-            raise RuntimeError("Configure IMAGE_DASHBOARD_POSTGRES_DSN para usar PostgreSQL.")
+            raise RuntimeError("Configure host, porta, banco e usuario do PostgreSQL na pagina /config.")
         connection = psycopg2.connect(POSTGRES_DSN, connect_timeout=max(1, int(timeout_seconds)), cursor_factory=RealDictCursor)
         return PostgresConnection(connection)
 
@@ -607,6 +704,9 @@ def ensure_database() -> None:
             CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_capture_id
                 ON indexed_files (garage, capture_date, id);
 
+            CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_queue
+                ON indexed_files (duration_seconds, extension, id);
+
             CREATE INDEX IF NOT EXISTS idx_camera_inventory_garage_vehicle_camera
                 ON camera_inventory (garage, vehicle, camera);
             """
@@ -778,14 +878,17 @@ def bootstrap_summary_if_needed() -> None:
             invalidate_dashboard_cache()
             print("Agregados iniciais do dashboard prontos.")
     except Exception as exc:
+        LOGGER.exception("Falha ao montar agregados iniciais")
         print(f"[ERRO] Falha ao montar agregados iniciais: {exc}")
-        traceback.print_exc()
 
 
 def safe_scandir(path: Path) -> List[os.DirEntry]:
     try:
         with os.scandir(path) as entries:
-            return sorted(entries, key=lambda entry: entry.name)
+            items = list(entries)
+            if SCAN_SORT_ENTRIES:
+                items.sort(key=lambda entry: entry.name)
+            return items
     except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
         return []
 
@@ -1181,8 +1284,9 @@ def hydrate_missing_durations() -> dict:
             WHERE duration_seconds IS NULL
               AND LOWER(extension) IN ({extension_placeholders})
             ORDER BY id
+            LIMIT ?
             """,
-            tuple(sorted(VIDEO_EXTENSIONS)),
+            (*tuple(sorted(VIDEO_EXTENSIONS)), max(1, DURATION_MAX_FILES_PER_RUN)),
         ).fetchall()
 
         update_duration_state(pending_files=len(pending_rows))
@@ -1254,6 +1358,7 @@ def run_duration_job() -> None:
             DURATION_STATE["pending_files"] = 0
             DURATION_STATE["current_file"] = None
     except Exception as exc:
+        LOGGER.exception("Falha no job de duracao")
         traceback.print_exc()
         try:
             with open_db() as connection:
@@ -1262,6 +1367,7 @@ def run_duration_job() -> None:
                 set_metadata(connection, "last_duration_status", "error")
                 connection.commit()
         except Exception:
+            LOGGER.exception("Falha ao registrar erro de duracao")
             traceback.print_exc()
         with DURATION_LOCK:
             DURATION_STATE["running"] = False
@@ -1316,6 +1422,7 @@ def run_scan_job(scan_id: str, full_refresh: bool) -> None:
         if ENABLE_VIDEO_DURATION:
             start_duration_job()
     except Exception as exc:
+        LOGGER.exception("Falha no job de indexacao")
         traceback.print_exc()
         try:
             with open_db() as connection:
@@ -1324,6 +1431,7 @@ def run_scan_job(scan_id: str, full_refresh: bool) -> None:
                 set_metadata(connection, "last_scan_error", str(exc))
                 connection.commit()
         except Exception:
+            LOGGER.exception("Falha ao registrar erro de indexacao")
             traceback.print_exc()
         with SCAN_LOCK:
             SCAN_STATE["running"] = False
@@ -1766,7 +1874,14 @@ def get_remote_sync_state() -> dict:
         return dict(REMOTE_SYNC_STATE)
 
 
-def upsert_remote_export(payload: dict, expected_garage: str, sync_id: str, prune: bool = True) -> dict:
+def upsert_remote_export(
+    payload: dict,
+    expected_garage: str,
+    sync_id: str,
+    prune: bool = True,
+    rebuild_summary: bool = True,
+    invalidate_cache: bool = True,
+) -> dict:
     exported_garage = payload.get("garage") or expected_garage
     files = payload.get("files") or []
     cameras = payload.get("cameras") or []
@@ -1853,12 +1968,14 @@ def upsert_remote_export(payload: dict, expected_garage: str, sync_id: str, prun
                 """,
                 (expected_garage, sync_id),
             ).rowcount
-        if prune and start_date and end_date:
-            rebuild_summary_for_range(connection, expected_garage, start_date, end_date)
-        else:
-            rebuild_summary_for_dates(connection, expected_garage, affected_dates)
+        if rebuild_summary:
+            if prune and start_date and end_date:
+                rebuild_summary_for_range(connection, expected_garage, start_date, end_date)
+            else:
+                rebuild_summary_for_dates(connection, expected_garage, affected_dates)
         connection.commit()
-        invalidate_dashboard_cache()
+        if invalidate_cache:
+            invalidate_dashboard_cache()
 
     return {
         "garage": expected_garage,
@@ -1933,7 +2050,14 @@ def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) ->
                 export_query["offset"] = str(offset)
             payload = fetch_remote_json(base_url, "/api/export", export_query)
             update_remote_sync_state(current_garage=garage, current_step="import", mode=mode, sync_days=sync_days)
-            result = upsert_remote_export(payload, garage, sync_id, prune=False)
+            result = upsert_remote_export(
+                payload,
+                garage,
+                sync_id,
+                prune=False,
+                rebuild_summary=REMOTE_REBUILD_SUMMARY_EACH_PAGE,
+                invalidate_cache=REMOTE_REBUILD_SUMMARY_EACH_PAGE,
+            )
             imported_files += result["imported_files"]
             imported_cameras += result["imported_cameras"]
             pages += 1
@@ -1965,6 +2089,7 @@ def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) ->
             **prune_result,
         }
     except Exception as exc:
+        LOGGER.exception("Falha ao sincronizar garagem remota %s", garage)
         update_remote_garage_state(garage, "offline", str(exc))
         return {"status": "error", "garage": garage, "mode": mode, "sync_days": sync_days, "error": str(exc)}
 
@@ -2842,13 +2967,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
+            LOGGER.exception("Falha ao atender %s", self.path)
             print(f"[ERRO] Falha ao atender {self.path}: {exc}")
-            traceback.print_exc()
             try:
                 self.serve_json(
                     {
                         "status": "error",
-                        "message": str(exc),
+                        "message": "Falha ao carregar banco de dados.",
                         "path": self.path,
                         "generated_at": iso_now(),
                     },
@@ -2867,13 +2992,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
+            LOGGER.exception("Falha ao atender %s", self.path)
             print(f"[ERRO] Falha ao atender {self.path}: {exc}")
-            traceback.print_exc()
             try:
                 self.serve_json(
                     {
                         "status": "error",
-                        "message": str(exc),
+                        "message": "Falha ao carregar banco de dados.",
                         "path": self.path,
                         "generated_at": iso_now(),
                     },
@@ -2891,7 +3016,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return json.loads(raw_body.decode("utf-8") or "{}")
 
     def serve_json(self, payload: dict, status_code: int = HTTPStatus.OK) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(payload, ensure_ascii=False, default=json_default).encode("utf-8")
         self.send_response(status_code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))

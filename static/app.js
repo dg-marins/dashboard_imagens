@@ -14,6 +14,7 @@ const garageStatusGrid = document.getElementById("garageStatusGrid");
 const dailyOverview = document.getElementById("dailyOverview");
 const matrixTable = document.getElementById("matrixTable");
 const statusMessage = document.getElementById("statusMessage");
+const toastStack = document.getElementById("toastStack");
 const summaryCardTemplate = document.getElementById("summaryCardTemplate");
 const exportXlsxBox = document.getElementById("exportXlsxBox");
 const openExportXlsxButton = document.getElementById("openExportXlsx");
@@ -423,13 +424,40 @@ function renderLoadingDashboard() {
 }
 
 function showStatus(message) {
-  statusMessage.textContent = message;
-  statusMessage.classList.remove("hidden");
+  showToast(message, "error");
 }
 
 function hideStatus() {
   statusMessage.textContent = "";
   statusMessage.classList.add("hidden");
+}
+
+function showToast(message, kind = "info") {
+  if (!toastStack) return;
+  const toast = document.createElement("article");
+  toast.className = `toast toast-${kind}`;
+  toast.innerHTML = `
+    <strong>${kind === "error" ? "Atenção" : "Informação"}</strong>
+    <span>${message}</span>
+    <button type="button" aria-label="Fechar">×</button>
+  `;
+  const close = () => toast.remove();
+  toast.querySelector("button").addEventListener("click", close);
+  toastStack.appendChild(toast);
+  window.setTimeout(close, 7000);
+}
+
+function friendlyLoadError(error) {
+  const message = String(error?.message || "").toLowerCase();
+  if (
+    message.includes("database") ||
+    message.includes("banco") ||
+    message.includes("decimal") ||
+    message.includes("json")
+  ) {
+    return "Falha ao carregar banco de dados.";
+  }
+  return "Não foi possível carregar o relatório.";
 }
 
 function buildQuery() {
@@ -754,15 +782,10 @@ async function loadDashboard(options = {}) {
       return;
     }
     setSectionLoading(false);
-    showStatus(`Falha ao carregar dados: ${error.message}`);
+    showStatus(friendlyLoadError(error));
     if (!showLoading) {
       return;
     }
-    summaryGrid.innerHTML = '<p class="muted">Não foi possível carregar o relatório.</p>';
-    garageStatusGrid.innerHTML = "";
-    dailyOverview.innerHTML = "";
-    matrixTable.querySelector("thead").innerHTML = "";
-    matrixTable.querySelector("tbody").innerHTML = "";
   } finally {
     if (requestId === dashboardRequestId) {
       dashboardLoading = false;
