@@ -40,7 +40,9 @@ from config import (
     DASHBOARD_CACHE_SECONDS,
     DAY_LEVELS,
     DURATION_INTERVAL_SECONDS,
+    DURATION_MAX_ATTEMPTS,
     DURATION_MAX_FILES_PER_RUN,
+    DURATION_RETRY_SECONDS,
     DURATION_UPDATE_BATCH_SIZE,
     ENABLE_VIDEO_DURATION,
     EXPORT_XLSX_ENABLED,
@@ -188,6 +190,8 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "global": "DURATION_INTERVAL_SECONDS", "type": "int", "group": "Videos", "label": "Intervalo da fila de duracao (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_DURATION_UPDATE_BATCH_SIZE", "global": "DURATION_UPDATE_BATCH_SIZE", "type": "int", "group": "Videos", "label": "Lote de duracoes", "live": True},
     {"name": "IMAGE_DASHBOARD_DURATION_MAX_FILES_PER_RUN", "global": "DURATION_MAX_FILES_PER_RUN", "type": "int", "group": "Videos", "label": "Maximo de videos por rodada", "live": True},
+    {"name": "IMAGE_DASHBOARD_DURATION_MAX_ATTEMPTS", "global": "DURATION_MAX_ATTEMPTS", "type": "int", "group": "Videos", "label": "Tentativas por video", "live": True},
+    {"name": "IMAGE_DASHBOARD_DURATION_RETRY_SECONDS", "global": "DURATION_RETRY_SECONDS", "type": "int", "group": "Videos", "label": "Retry de duracao (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_VIDEO_EXTENSIONS", "global": "VIDEO_EXTENSIONS", "type": "csv_set", "group": "Videos", "label": "Extensoes de video", "live": True},
     {"name": "IMAGE_DASHBOARD_FFPROBE_BINARY", "global": "FFPROBE_BINARY", "type": "str", "group": "Videos", "label": "Binario ffprobe", "live": True},
     {"name": "IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "global": "FFPROBE_TIMEOUT_SECONDS", "type": "int", "group": "Videos", "label": "Timeout ffprobe (s)", "live": True},
@@ -561,6 +565,9 @@ def ensure_database() -> None:
                     real_path TEXT NOT NULL,
                     size_bytes BIGINT,
                     duration_seconds DOUBLE PRECISION,
+                    duration_probe_attempts INTEGER NOT NULL DEFAULT 0,
+                    duration_probe_error TEXT,
+                    duration_probe_at TEXT,
                     modified_at TEXT,
                     indexed_at TEXT NOT NULL,
                     last_seen_scan_id TEXT
@@ -629,6 +636,10 @@ def ensure_database() -> None:
                     source_path TEXT NOT NULL,
                     real_path TEXT NOT NULL,
                     size_bytes INTEGER,
+                    duration_seconds REAL,
+                    duration_probe_attempts INTEGER NOT NULL DEFAULT 0,
+                    duration_probe_error TEXT,
+                    duration_probe_at TEXT,
                     modified_at TEXT,
                     indexed_at TEXT NOT NULL
                 );
@@ -682,6 +693,9 @@ def ensure_database() -> None:
         ensure_column(connection, "indexed_files", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "indexed_files", "last_seen_scan_id", "TEXT")
         ensure_column(connection, "indexed_files", "duration_seconds", "DOUBLE PRECISION" if is_postgres() else "REAL")
+        ensure_column(connection, "indexed_files", "duration_probe_attempts", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(connection, "indexed_files", "duration_probe_error", "TEXT")
+        ensure_column(connection, "indexed_files", "duration_probe_at", "TEXT")
         ensure_column(connection, "camera_inventory", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "camera_inventory", "last_seen_scan_id", "TEXT")
         connection.executescript(
@@ -704,8 +718,8 @@ def ensure_database() -> None:
             CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_capture_id
                 ON indexed_files (garage, capture_date, id);
 
-            CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_queue
-                ON indexed_files (duration_seconds, extension, id);
+            CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_retry_queue
+                ON indexed_files (duration_seconds, extension, duration_probe_attempts, duration_probe_at, id);
 
             CREATE INDEX IF NOT EXISTS idx_camera_inventory_garage_vehicle_camera
                 ON camera_inventory (garage, vehicle, camera);
@@ -900,13 +914,15 @@ def has_ffprobe() -> bool:
     return FFPROBE_AVAILABLE
 
 
-def probe_duration_seconds(file_path: Path) -> Optional[float]:
+def probe_duration_seconds(file_path: Path) -> Tuple[Optional[float], Optional[str]]:
     if not ENABLE_VIDEO_DURATION:
-        return None
+        return None, "Coleta de duracao desativada."
     if file_path.suffix.lower() not in VIDEO_EXTENSIONS:
-        return None
+        return None, "Extensao nao configurada como video."
     if not has_ffprobe():
-        return None
+        return None, "ffprobe nao encontrado."
+    if not file_path.exists():
+        return None, "Arquivo nao encontrado."
 
     try:
         result = subprocess.run(
@@ -925,20 +941,25 @@ def probe_duration_seconds(file_path: Path) -> Optional[float]:
             timeout=FFPROBE_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
+    except subprocess.TimeoutExpired:
+        return None, f"ffprobe excedeu {FFPROBE_TIMEOUT_SECONDS}s."
+    except OSError as exc:
+        return None, str(exc)
+    except subprocess.SubprocessError as exc:
+        return None, str(exc)
 
     if result.returncode != 0:
-        return None
+        error_output = (result.stderr or result.stdout or "").strip()
+        return None, error_output[:500] or f"ffprobe retornou codigo {result.returncode}."
 
     output = (result.stdout or "").strip()
     if not output:
-        return None
+        return None, "ffprobe nao retornou duracao."
 
     try:
-        return round(float(output), 3)
+        return round(float(output), 3), None
     except ValueError:
-        return None
+        return None, f"Duracao invalida retornada pelo ffprobe: {output[:120]}"
 
 
 def get_scan_status() -> dict:
@@ -1007,6 +1028,21 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
                 WHEN {same_file_condition}
                 THEN indexed_files.duration_seconds
                 ELSE excluded.duration_seconds
+            END,
+            duration_probe_attempts = CASE
+                WHEN {same_file_condition}
+                THEN indexed_files.duration_probe_attempts
+                ELSE 0
+            END,
+            duration_probe_error = CASE
+                WHEN {same_file_condition}
+                THEN indexed_files.duration_probe_error
+                ELSE NULL
+            END,
+            duration_probe_at = CASE
+                WHEN {same_file_condition}
+                THEN indexed_files.duration_probe_at
+                ELSE NULL
             END,
             modified_at = excluded.modified_at,
             indexed_at = excluded.indexed_at,
@@ -1267,8 +1303,15 @@ def hydrate_missing_durations() -> dict:
         }
 
     extension_placeholders = ", ".join("?" for _ in VIDEO_EXTENSIONS)
+    video_extensions = tuple(sorted(VIDEO_EXTENSIONS))
+    max_attempts = max(1, DURATION_MAX_ATTEMPTS)
+    retry_cutoff = (
+        datetime.now() - timedelta(seconds=max(0, DURATION_RETRY_SECONDS))
+    ).isoformat(timespec="seconds")
     processed_files = 0
     updated_files = 0
+    failed_files = 0
+    remaining_pending = 0
 
     with open_db() as connection:
         set_metadata(connection, "last_duration_started_at", started_at)
@@ -1283,14 +1326,45 @@ def hydrate_missing_durations() -> dict:
             FROM indexed_files
             WHERE duration_seconds IS NULL
               AND LOWER(extension) IN ({extension_placeholders})
+              AND COALESCE(duration_probe_attempts, 0) < ?
+              AND (duration_probe_at IS NULL OR duration_probe_at <= ?)
             ORDER BY id
             LIMIT ?
             """,
-            (*tuple(sorted(VIDEO_EXTENSIONS)), max(1, DURATION_MAX_FILES_PER_RUN)),
+            (*video_extensions, max_attempts, retry_cutoff, max(1, DURATION_MAX_FILES_PER_RUN)),
         ).fetchall()
 
         update_duration_state(pending_files=len(pending_rows))
-        update_batch: List[tuple] = []
+        success_batch: List[tuple] = []
+        failure_batch: List[tuple] = []
+
+        def flush_duration_batches() -> None:
+            if success_batch:
+                connection.executemany(
+                    """
+                    UPDATE indexed_files
+                    SET duration_seconds = ?,
+                        duration_probe_attempts = 0,
+                        duration_probe_error = NULL,
+                        duration_probe_at = ?
+                    WHERE id = ?
+                    """,
+                    success_batch,
+                )
+                success_batch.clear()
+            if failure_batch:
+                connection.executemany(
+                    """
+                    UPDATE indexed_files
+                    SET duration_probe_attempts = COALESCE(duration_probe_attempts, 0) + 1,
+                        duration_probe_error = ?,
+                        duration_probe_at = ?
+                    WHERE id = ?
+                    """,
+                    failure_batch,
+                )
+                failure_batch.clear()
+            connection.commit()
 
         for row in pending_rows:
             if get_scan_status().get("running"):
@@ -1302,29 +1376,39 @@ def hydrate_missing_durations() -> dict:
                 current_file=row["file_name"],
             )
 
-            duration_seconds = probe_duration_seconds(Path(row["source_path"]))
+            duration_seconds, probe_error = probe_duration_seconds(Path(row["source_path"]))
+            probed_at = iso_now()
             if duration_seconds is not None:
                 updated_files += 1
-                update_batch.append((duration_seconds, row["id"]))
+                success_batch.append((duration_seconds, probed_at, row["id"]))
+            else:
+                failed_files += 1
+                failure_batch.append(((probe_error or "Duracao indisponivel.")[:500], probed_at, row["id"]))
 
-            if DURATION_UPDATE_BATCH_SIZE > 0 and len(update_batch) >= DURATION_UPDATE_BATCH_SIZE:
+            if (
+                DURATION_UPDATE_BATCH_SIZE > 0
+                and len(success_batch) + len(failure_batch) >= DURATION_UPDATE_BATCH_SIZE
+            ):
                 if get_scan_status().get("running"):
-                    update_batch.clear()
+                    success_batch.clear()
+                    failure_batch.clear()
                     break
-                connection.executemany(
-                    "UPDATE indexed_files SET duration_seconds = ? WHERE id = ?",
-                    update_batch,
-                )
-                connection.commit()
-                update_batch.clear()
+                flush_duration_batches()
                 update_duration_state(updated_files=updated_files)
 
-        if update_batch and not get_scan_status().get("running"):
-            connection.executemany(
-                "UPDATE indexed_files SET duration_seconds = ? WHERE id = ?",
-                update_batch,
-            )
-            connection.commit()
+        if (success_batch or failure_batch) and not get_scan_status().get("running"):
+            flush_duration_batches()
+
+        remaining_pending = connection.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM indexed_files
+            WHERE duration_seconds IS NULL
+              AND LOWER(extension) IN ({extension_placeholders})
+              AND COALESCE(duration_probe_attempts, 0) < ?
+            """,
+            (*video_extensions, max_attempts),
+        ).fetchone()["total"]
 
         finished_at = iso_now()
         set_metadata(connection, "last_duration_started_at", started_at)
@@ -1332,7 +1416,8 @@ def hydrate_missing_durations() -> dict:
         set_metadata(connection, "last_duration_error", "")
         set_metadata(connection, "last_duration_processed_files", str(processed_files))
         set_metadata(connection, "last_duration_updated_files", str(updated_files))
-        set_metadata(connection, "last_duration_pending_files", str(len(pending_rows)))
+        set_metadata(connection, "last_duration_failed_files", str(failed_files))
+        set_metadata(connection, "last_duration_pending_files", str(remaining_pending))
         set_metadata(connection, "last_duration_status", "ok")
         connection.commit()
 
@@ -1342,7 +1427,8 @@ def hydrate_missing_durations() -> dict:
         "finished_at": iso_now(),
         "processed_files": processed_files,
         "updated_files": updated_files,
-        "pending_files": processed_files,
+        "failed_files": failed_files,
+        "pending_files": remaining_pending,
     }
 
 
@@ -1355,7 +1441,7 @@ def run_duration_job() -> None:
             DURATION_STATE["error"] = None if result["status"] != "error" else result.get("message")
             DURATION_STATE["processed_files"] = result.get("processed_files", 0)
             DURATION_STATE["updated_files"] = result.get("updated_files", 0)
-            DURATION_STATE["pending_files"] = 0
+            DURATION_STATE["pending_files"] = result.get("pending_files", 0)
             DURATION_STATE["current_file"] = None
     except Exception as exc:
         LOGGER.exception("Falha no job de duracao")
@@ -2788,6 +2874,7 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
                 "last_duration_error": metadata.get("last_duration_error"),
                 "last_duration_processed_files": metadata.get("last_duration_processed_files", "0"),
                 "last_duration_updated_files": metadata.get("last_duration_updated_files", "0"),
+                "last_duration_failed_files": metadata.get("last_duration_failed_files", "0"),
                 "last_duration_pending_files": metadata.get("last_duration_pending_files", "0"),
                 "last_duration_status": metadata.get("last_duration_status"),
                 "current_status": get_duration_status(),
