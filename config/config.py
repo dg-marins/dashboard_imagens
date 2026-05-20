@@ -5,8 +5,16 @@ from typing import List, Tuple
 from urllib.parse import quote_plus
 
 
+# ---------------------------------------------------------------------------
+# Base paths and persisted overrides
+# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_FILE = Path(os.getenv("IMAGE_DASHBOARD_CONFIG_FILE", str(BASE_DIR / "config" / "dashboard_config.json")))
+CONFIG_FILE = Path(
+    os.getenv(
+        "IMAGE_DASHBOARD_CONFIG_FILE",
+        str(BASE_DIR / "config" / "dashboard_config.json"),
+    )
+)
 
 
 def load_config_overrides() -> dict:
@@ -23,6 +31,14 @@ def load_config_overrides() -> dict:
 CONFIG_OVERRIDES = load_config_overrides()
 
 
+# ---------------------------------------------------------------------------
+# Config readers
+#
+# Precedence:
+#   1. config/dashboard_config.json
+#   2. environment variable
+#   3. hardcoded default in this file
+# ---------------------------------------------------------------------------
 def setting(name: str, default: str) -> str:
     if name in CONFIG_OVERRIDES:
         return str(CONFIG_OVERRIDES[name])
@@ -59,41 +75,101 @@ def env_day_levels(name: str, default: str) -> Tuple[Tuple[int, str], ...]:
     return tuple(sorted(levels)) or tuple()
 
 
+# ---------------------------------------------------------------------------
+# Application paths
+# ---------------------------------------------------------------------------
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATE_DIR = BASE_DIR / "templates"
-
 IMAGE_ROOT = Path(setting("IMAGE_DASHBOARD_ROOT", "/home/publico/imagens"))
+
+
+# ---------------------------------------------------------------------------
+# Local identity
+# ---------------------------------------------------------------------------
 LOCAL_GARAGE = setting("IMAGE_DASHBOARD_GARAGE", "G1").strip() or "G1"
-DB_ENGINE = setting("IMAGE_DASHBOARD_DB_ENGINE", "sqlite").strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# Database
+# PostgreSQL is the recommended/default database. SQLite remains available for
+# simple local installs and fallback scenarios.
+# ---------------------------------------------------------------------------
+DB_ENGINE = setting("IMAGE_DASHBOARD_DB_ENGINE", "postgres").strip().lower()
+
+# SQLite
 DB_PATH = Path(setting("IMAGE_DASHBOARD_DB", str(BASE_DIR / "db" / "dashboard_imagens.db")))
+SQLITE_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "30")
+SQLITE_JOURNAL_MODE = setting("IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "WAL")
+SQLITE_SYNCHRONOUS = setting("IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "NORMAL")
+SQLITE_TEMP_STORE = setting("IMAGE_DASHBOARD_SQLITE_TEMP_STORE", "MEMORY")
+SQLITE_CACHE_SIZE = env_int("IMAGE_DASHBOARD_SQLITE_CACHE_SIZE", "-64000")
+SQLITE_BUSY_TIMEOUT_MS = env_int("IMAGE_DASHBOARD_SQLITE_BUSY_TIMEOUT_MS", str(SQLITE_TIMEOUT_SECONDS * 1000))
+DB_STATUS_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_DB_STATUS_TIMEOUT_SECONDS", "1")
+
+# PostgreSQL
 POSTGRES_HOST = setting("IMAGE_DASHBOARD_POSTGRES_HOST", "127.0.0.1").strip()
 POSTGRES_PORT = env_int("IMAGE_DASHBOARD_POSTGRES_PORT", "5432")
-POSTGRES_DB = setting("IMAGE_DASHBOARD_POSTGRES_DB", "").strip()
-POSTGRES_USER = setting("IMAGE_DASHBOARD_POSTGRES_USER", "").strip()
+POSTGRES_DB = setting("IMAGE_DASHBOARD_POSTGRES_DB", "relatorio_cores_dev").strip()
+POSTGRES_USER = setting("IMAGE_DASHBOARD_POSTGRES_USER", "tecbee").strip()
 POSTGRES_PASSWORD = setting("IMAGE_DASHBOARD_POSTGRES_PASSWORD", "").strip()
 POSTGRES_DSN = setting("IMAGE_DASHBOARD_POSTGRES_DSN", "").strip()
+
 if not POSTGRES_DSN and POSTGRES_DB and POSTGRES_USER:
     auth = quote_plus(POSTGRES_USER)
     if POSTGRES_PASSWORD:
         auth = f"{auth}:{quote_plus(POSTGRES_PASSWORD)}"
     POSTGRES_DSN = f"postgresql://{auth}@{POSTGRES_HOST}:{POSTGRES_PORT}/{quote_plus(POSTGRES_DB)}"
 
+# Reserved for future MySQL support.
 MYSQL_HOST = setting("IMAGE_DASHBOARD_MYSQL_HOST", "127.0.0.1").strip()
 MYSQL_PORT = env_int("IMAGE_DASHBOARD_MYSQL_PORT", "3306")
 MYSQL_DB = setting("IMAGE_DASHBOARD_MYSQL_DB", "").strip()
 MYSQL_USER = setting("IMAGE_DASHBOARD_MYSQL_USER", "").strip()
 MYSQL_PASSWORD = setting("IMAGE_DASHBOARD_MYSQL_PASSWORD", "").strip()
 
+
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
 HOST = setting("IMAGE_DASHBOARD_HOST", "0.0.0.0")
 PORT = env_int("IMAGE_DASHBOARD_PORT", "8081")
 
+
+# ---------------------------------------------------------------------------
+# Indexing scheduler
+# ---------------------------------------------------------------------------
 AUTO_SCAN_ON_START = env_bool("IMAGE_DASHBOARD_AUTO_SCAN", "1")
-ENABLE_VIDEO_DURATION = env_bool("IMAGE_DASHBOARD_ENABLE_DURATION", "1")
-
 SCAN_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS", "300")
-DURATION_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "300")
 SCAN_SORT_ENTRIES = env_bool("IMAGE_DASHBOARD_SCAN_SORT_ENTRIES", "0")
+SCAN_PROGRESS_EVERY_FILES = env_int("IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "1000")
 
+
+# ---------------------------------------------------------------------------
+# Indexing batches and parsing
+# ---------------------------------------------------------------------------
+INDEX_FILE_BATCH_SIZE = env_int("IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "10000")
+INDEX_CAMERA_BATCH_SIZE = env_int("IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "2000")
+DATE_DIR_REGEX = setting("IMAGE_DASHBOARD_DATE_DIR_REGEX", r"^\d{4}-\d{2}-\d{2}$")
+TIMESTAMP_FILE_REGEX = setting("IMAGE_DASHBOARD_TIMESTAMP_FILE_REGEX", r"^\d{14}(?:\..+)?$")
+
+
+# ---------------------------------------------------------------------------
+# Video duration queue
+# ---------------------------------------------------------------------------
+ENABLE_VIDEO_DURATION = env_bool("IMAGE_DASHBOARD_ENABLE_DURATION", "1")
+DURATION_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "300")
+DURATION_UPDATE_BATCH_SIZE = env_int("IMAGE_DASHBOARD_DURATION_UPDATE_BATCH_SIZE", "1000")
+DURATION_MAX_FILES_PER_RUN = env_int("IMAGE_DASHBOARD_DURATION_MAX_FILES_PER_RUN", "5000")
+DURATION_MAX_ATTEMPTS = env_int("IMAGE_DASHBOARD_DURATION_MAX_ATTEMPTS", "3")
+DURATION_RETRY_SECONDS = env_int("IMAGE_DASHBOARD_DURATION_RETRY_SECONDS", "3600")
+VIDEO_EXTENSIONS = set(env_list("IMAGE_DASHBOARD_VIDEO_EXTENSIONS", ".mp4,.avi,.mkv,.mov,.wmv,.flv,.webm,.mpeg,.mpg,.m4v"))
+FFPROBE_BINARY = setting("IMAGE_DASHBOARD_FFPROBE_BINARY", "ffprobe")
+FFPROBE_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "1")
+
+
+# ---------------------------------------------------------------------------
+# Remote garages and synchronization
+# ---------------------------------------------------------------------------
 REMOTE_GARAGES = setting("IMAGE_DASHBOARD_REMOTE_GARAGES", "").strip()
 REMOTE_HEALTH_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_HEALTH_INTERVAL_SECONDS", "120")
 REMOTE_SYNC_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_SYNC_INTERVAL_SECONDS", "180")
@@ -104,30 +180,12 @@ REMOTE_REQUEST_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS
 REMOTE_EXPORT_BATCH_SIZE = env_int("IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE", "5000")
 REMOTE_REBUILD_SUMMARY_EACH_PAGE = env_bool("IMAGE_DASHBOARD_REMOTE_REBUILD_SUMMARY_EACH_PAGE", "0")
 
-INDEX_FILE_BATCH_SIZE = env_int("IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "10000")
-INDEX_CAMERA_BATCH_SIZE = env_int("IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "2000")
-SCAN_PROGRESS_EVERY_FILES = env_int("IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "1000")
-DURATION_UPDATE_BATCH_SIZE = env_int("IMAGE_DASHBOARD_DURATION_UPDATE_BATCH_SIZE", "1000")
-DURATION_MAX_FILES_PER_RUN = env_int("IMAGE_DASHBOARD_DURATION_MAX_FILES_PER_RUN", "5000")
-DURATION_MAX_ATTEMPTS = env_int("IMAGE_DASHBOARD_DURATION_MAX_ATTEMPTS", "3")
-DURATION_RETRY_SECONDS = env_int("IMAGE_DASHBOARD_DURATION_RETRY_SECONDS", "3600")
 
-DATE_DIR_REGEX = setting("IMAGE_DASHBOARD_DATE_DIR_REGEX", r"^\d{4}-\d{2}-\d{2}$")
-TIMESTAMP_FILE_REGEX = setting("IMAGE_DASHBOARD_TIMESTAMP_FILE_REGEX", r"^\d{14}(?:\..+)?$")
-VIDEO_EXTENSIONS = set(env_list("IMAGE_DASHBOARD_VIDEO_EXTENSIONS", ".mp4,.avi,.mkv,.mov,.wmv,.flv,.webm,.mpeg,.mpg,.m4v"))
+# ---------------------------------------------------------------------------
+# Dashboard, report and features
+# ---------------------------------------------------------------------------
 DAY_LEVELS = env_day_levels("IMAGE_DASHBOARD_DAY_LEVELS", "0:none,1:low,401:medium,801:high")
 ALERT_DAYS_WITHOUT_FILES = env_int("IMAGE_DASHBOARD_ALERT_DAYS_WITHOUT_FILES", "3")
 TOP_ROWS_LIMIT = env_int("IMAGE_DASHBOARD_TOP_ROWS_LIMIT", "8")
 DASHBOARD_CACHE_SECONDS = env_int("IMAGE_DASHBOARD_CACHE_SECONDS", "20")
 EXPORT_XLSX_ENABLED = env_bool("IMAGE_DASHBOARD_EXPORT_XLSX_ENABLED", "0")
-
-SQLITE_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "30")
-SQLITE_JOURNAL_MODE = setting("IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "WAL")
-SQLITE_SYNCHRONOUS = setting("IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "NORMAL")
-SQLITE_TEMP_STORE = setting("IMAGE_DASHBOARD_SQLITE_TEMP_STORE", "MEMORY")
-SQLITE_CACHE_SIZE = env_int("IMAGE_DASHBOARD_SQLITE_CACHE_SIZE", "-64000")
-SQLITE_BUSY_TIMEOUT_MS = env_int("IMAGE_DASHBOARD_SQLITE_BUSY_TIMEOUT_MS", str(SQLITE_TIMEOUT_SECONDS * 1000))
-DB_STATUS_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_DB_STATUS_TIMEOUT_SECONDS", "1")
-
-FFPROBE_BINARY = setting("IMAGE_DASHBOARD_FFPROBE_BINARY", "ffprobe")
-FFPROBE_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "1")
