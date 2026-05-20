@@ -389,11 +389,12 @@ button.ghost:hover {
 }
 
 .config-shell {
-  max-width: 1180px;
+  max-width: 1200px;
 }
 
 .config-header {
   align-items: center;
+  margin-bottom: 20px;
 }
 
 .config-back-link {
@@ -418,12 +419,12 @@ button.ghost:hover {
   align-items: center;
   justify-content: flex-end;
   gap: 14px;
-  margin-bottom: 14px;
-  padding: 12px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 12px 35px rgba(38, 57, 67, 0.08);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 36px rgba(21, 25, 30, 0.1);
   backdrop-filter: blur(14px);
 }
 
@@ -443,27 +444,123 @@ button.ghost:hover {
 
 .config-form {
   display: grid;
-  gap: 14px;
+  gap: 16px;
 }
 
 .config-panel {
-  padding: 16px;
+  position: relative;
+  overflow: hidden;
+  padding: 18px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: var(--shadow);
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 18px 45px rgba(21, 25, 30, 0.1);
+}
+
+.config-panel::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: linear-gradient(90deg, var(--gold), #ffe08a);
+}
+
+.config-panel .panel-header {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.config-panel h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1.05rem;
+  font-weight: 850;
+}
+
+.config-panel-toggle {
+  display: inline-grid;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  place-items: center;
+  padding: 0;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #fff;
+}
+
+.config-panel-toggle::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform 0.16s ease;
+}
+
+.config-panel.is-collapsed .config-panel-toggle::before {
+  transform: translateX(-2px) rotate(-45deg);
+}
+
+.config-panel-toggle:hover {
+  border-color: var(--gold);
+  background: #fff8df;
+}
+
+.config-panel-body {
+  display: grid;
+}
+
+.config-panel.is-collapsed {
+  padding-bottom: 14px;
+}
+
+.config-panel.is-collapsed .panel-header {
+  margin-bottom: 0;
+}
+
+.config-panel.is-collapsed .config-panel-body {
+  display: none;
+}
+
+.config-panel .config-grid + .config-subsection,
+.config-subsection + .config-subsection {
+  margin-top: 14px;
+}
+
+.config-subsection {
+  padding: 14px;
+  border: 1px solid #e3e8ee;
+  border-left: 4px solid var(--gold);
+  border-radius: 8px;
+  background: #f8fafb;
+}
+
+.config-subsection h3 {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-size: 0.92rem;
+  font-weight: 850;
 }
 
 .config-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px 16px;
 }
 
 .config-field {
   display: grid;
-  gap: 7px;
+  gap: 8px;
   align-content: start;
+  min-width: 0;
 }
 
 .config-field-wide {
@@ -480,6 +577,12 @@ button.ghost:hover {
   border-radius: 6px;
   background: #fbfcfb;
   outline: 0;
+}
+
+.config-field input,
+.config-field select {
+  height: 40px;
+  background: #fff;
 }
 
 .remote-garages-editor {
@@ -661,6 +764,26 @@ button.ghost:hover {
   box-shadow: 0 18px 42px rgba(21, 25, 30, 0.16);
   color: var(--ink);
   pointer-events: auto;
+}
+
+.toast-info {
+  border-color: rgba(255, 184, 0, 0.3);
+  border-left-color: var(--gold);
+}
+
+.toast-success {
+  border-color: rgba(23, 178, 106, 0.28);
+  border-left-color: var(--green);
+}
+
+.toast-warning {
+  border-color: rgba(255, 184, 0, 0.42);
+  border-left-color: var(--gold);
+}
+
+.toast-error {
+  border-color: rgba(217, 75, 61, 0.28);
+  border-left-color: var(--danger);
 }
 
 .toast strong,
@@ -1304,9 +1427,31 @@ td[class^="cell-"] .camera-stack {
     grid-template-columns: 1fr;
   }
 
+  .config-actions {
+    position: static;
+    align-items: stretch;
+  }
+
+  .config-actions button {
+    width: 100%;
+  }
+
+  .config-panel {
+    padding: 16px;
+  }
+
+  .config-grid {
+    grid-template-columns: 1fr;
+  }
+
   .panel-header {
     align-items: start;
     flex-direction: column;
+  }
+
+  .config-panel .panel-header {
+    align-items: center;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .export-xlsx-box,

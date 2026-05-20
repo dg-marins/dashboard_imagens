@@ -517,8 +517,8 @@ function renderGarageStatus(statuses) {
     const syncDetail = garage.syncing ? "Sincronizando" : "";
     const lastScan = formatConnectionTimestamp(garage.last_scan_finished_at);
     const lastConnection = formatConnectionTimestamp(garage.last_online_at);
-    const onlineDetail = garage.status === "online" && !garage.syncing
-      ? (lastScan ? `Ultima varredura:<br>${lastScan}` : "Aguardando primeira varredura")
+    const onlineDetail = garage.status === "online" && !garage.syncing && lastScan
+      ? `Ultima varredura:<br>${lastScan}`
       : "";
     const offlineDetail = garage.status === "offline"
       ? (lastConnection ? `Ultima conexao:<br>${lastConnection}` : "Aguardando Primeira Conexao")

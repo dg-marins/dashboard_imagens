@@ -153,7 +153,7 @@ DASHBOARD_CACHE: Dict[str, Tuple[float, dict]] = {}
 
 CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_ROOT", "global": "IMAGE_ROOT", "type": "path", "group": "Arquivos", "label": "Diretorio de imagens", "live": True},
-    {"name": "IMAGE_DASHBOARD_GARAGE", "global": "LOCAL_GARAGE", "type": "str", "group": "Arquivos", "label": "Garagem local", "live": True},
+    {"name": "IMAGE_DASHBOARD_GARAGE", "global": "LOCAL_GARAGE", "type": "str", "group": "Arquivos", "label": "Identificacao da garagem", "live": True},
     {
         "name": "IMAGE_DASHBOARD_DB_ENGINE",
         "global": "DB_ENGINE",
@@ -210,14 +210,14 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_ALERT_DAYS_WITHOUT_FILES", "global": "ALERT_DAYS_WITHOUT_FILES", "type": "int", "group": "Relatorio", "label": "Dias para alerta", "live": True},
     {"name": "IMAGE_DASHBOARD_TOP_ROWS_LIMIT", "global": "TOP_ROWS_LIMIT", "type": "int", "group": "Relatorio", "label": "Limite de destaques", "live": True},
     {"name": "IMAGE_DASHBOARD_CACHE_SECONDS", "global": "DASHBOARD_CACHE_SECONDS", "type": "int", "group": "Relatorio", "label": "Cache do dashboard (s)", "live": True},
-    {"name": "IMAGE_DASHBOARD_EXPORT_XLSX_ENABLED", "global": "EXPORT_XLSX_ENABLED", "type": "bool", "group": "Relatorio", "label": "Habilitar exportacao XLSX", "live": True},
-    {"name": "IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "global": "SQLITE_TIMEOUT_SECONDS", "type": "int", "group": "SQLite", "label": "Timeout SQLite (s)", "live": True},
-    {"name": "IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "global": "SQLITE_JOURNAL_MODE", "type": "str", "group": "SQLite", "label": "Journal mode", "live": True},
-    {"name": "IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "global": "SQLITE_SYNCHRONOUS", "type": "str", "group": "SQLite", "label": "Synchronous", "live": True},
-    {"name": "IMAGE_DASHBOARD_SQLITE_TEMP_STORE", "global": "SQLITE_TEMP_STORE", "type": "str", "group": "SQLite", "label": "Temp store", "live": True},
-    {"name": "IMAGE_DASHBOARD_SQLITE_CACHE_SIZE", "global": "SQLITE_CACHE_SIZE", "type": "int", "group": "SQLite", "label": "Cache size", "live": True},
-    {"name": "IMAGE_DASHBOARD_SQLITE_BUSY_TIMEOUT_MS", "global": "SQLITE_BUSY_TIMEOUT_MS", "type": "int", "group": "SQLite", "label": "Busy timeout (ms)", "live": True},
-    {"name": "IMAGE_DASHBOARD_DB_STATUS_TIMEOUT_SECONDS", "global": "DB_STATUS_TIMEOUT_SECONDS", "type": "int", "group": "SQLite", "label": "Timeout db-status (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_EXPORT_XLSX_ENABLED", "global": "EXPORT_XLSX_ENABLED", "type": "bool", "group": "Funcionalidades", "label": "Exportacao XLSX", "live": True},
+    {"name": "IMAGE_DASHBOARD_SQLITE_TIMEOUT_SECONDS", "global": "SQLITE_TIMEOUT_SECONDS", "type": "int", "group": "Banco", "label": "Timeout SQLite (s)", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_SQLITE_JOURNAL_MODE", "global": "SQLITE_JOURNAL_MODE", "type": "str", "group": "Banco", "label": "Journal mode", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_SQLITE_SYNCHRONOUS", "global": "SQLITE_SYNCHRONOUS", "type": "str", "group": "Banco", "label": "Synchronous", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_SQLITE_TEMP_STORE", "global": "SQLITE_TEMP_STORE", "type": "str", "group": "Banco", "label": "Temp store", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_SQLITE_CACHE_SIZE", "global": "SQLITE_CACHE_SIZE", "type": "int", "group": "Banco", "label": "Cache size", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_SQLITE_BUSY_TIMEOUT_MS", "global": "SQLITE_BUSY_TIMEOUT_MS", "type": "int", "group": "Banco", "label": "Busy timeout (ms)", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
+    {"name": "IMAGE_DASHBOARD_DB_STATUS_TIMEOUT_SECONDS", "global": "DB_STATUS_TIMEOUT_SECONDS", "type": "int", "group": "Banco", "label": "Timeout db-status (s)", "live": True, "depends_on": {"IMAGE_DASHBOARD_DB_ENGINE": "sqlite"}},
 ]
 
 

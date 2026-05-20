@@ -1,25 +1,67 @@
 const configForm = document.getElementById("configForm");
-const configStatus = document.getElementById("configStatus");
+const toastStack = document.getElementById("toastStack");
 const saveConfigButton = document.getElementById("saveConfig");
 
 let configFields = [];
+const collapsedGroups = new Set();
 
-function showConfigStatus(message, kind = "info") {
-  configStatus.textContent = message;
-  configStatus.className = `status-message config-status ${kind}`;
+const CONFIG_GROUP_ORDER = [
+  "Arquivos",
+  "Servidor",
+  "Garagens remotas",
+  "Banco",
+  "Indexacao",
+  "Videos",
+  "Padroes",
+  "Relatorio",
+  "Funcionalidades",
+];
+
+function showConfigToast(message, kind = "info") {
+  if (!toastStack) return;
+  const toast = document.createElement("article");
+  toast.className = `toast toast-${kind}`;
+  const titleByKind = {
+    error: "Falha ao salvar",
+    success: "Configuracao salva",
+    warning: "Reinicializacao necessaria",
+    info: "Configuracoes",
+  };
+  const title = document.createElement("strong");
+  title.textContent = titleByKind[kind] || titleByKind.info;
+  const content = document.createElement("span");
+  content.textContent = message;
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.setAttribute("aria-label", "Fechar");
+  closeButton.textContent = "x";
+  const close = () => toast.remove();
+  closeButton.addEventListener("click", close);
+  toast.append(title, content, closeButton);
+  toastStack.appendChild(toast);
+  window.setTimeout(close, kind === "error" || kind === "warning" ? 10000 : 6000);
 }
 
-function hideConfigStatus() {
-  configStatus.textContent = "";
-  configStatus.className = "status-message hidden";
+function clearConfigToasts() {
+  if (!toastStack) return;
+  toastStack.innerHTML = "";
 }
 
 function groupFields(fields) {
-  return fields.reduce((groups, field) => {
+  const groups = fields.reduce((groups, field) => {
     if (!groups[field.group]) groups[field.group] = [];
     groups[field.group].push(field);
     return groups;
   }, {});
+
+  return Object.entries(groups).sort(([groupA], [groupB]) => {
+    const indexA = CONFIG_GROUP_ORDER.indexOf(groupA);
+    const indexB = CONFIG_GROUP_ORDER.indexOf(groupB);
+    if (indexA === -1 && indexB === -1) return groupA.localeCompare(groupB);
+    if (indexA === -1) return 1;
+    if (indexB === -1) return -1;
+    return indexA - indexB;
+  });
 }
 
 function escapeHtml(value) {
@@ -86,11 +128,11 @@ function remoteGarageRow(row = {}) {
     <div class="remote-garage-row">
       <label>
         <span>Nome</span>
-        <input type="text" value="${escapeHtml(row.name)}" placeholder="G2" data-remote-name>
+        <input type="text" value="${escapeHtml(row.name)}" placeholder="Nome" data-remote-name>
       </label>
       <label>
         <span>IP</span>
-        <input type="text" value="${escapeHtml(row.ip)}" placeholder="10.90.0.14" data-remote-ip>
+        <input type="text" value="${escapeHtml(row.ip)}" placeholder="0.0.0.0" data-remote-ip>
       </label>
       <label>
         <span>Porta</span>
@@ -174,6 +216,83 @@ function fieldDependencyAttrs(field) {
   return ` data-depends-on="${escapeHtml(dependencyName)}" data-depends-value="${escapeHtml(dependencyValue)}"`;
 }
 
+function dependencyKey(field) {
+  const entries = Object.entries(field.depends_on || {});
+  if (!entries.length) return "";
+  const [dependencyName, dependencyValue] = entries[0];
+  return `${dependencyName}:${dependencyValue}`;
+}
+
+function dependencyTitle(field) {
+  const entries = Object.entries(field.depends_on || {});
+  if (!entries.length) return "";
+  const [dependencyName, dependencyValue] = entries[0];
+  const dependency = configFields.find((item) => item.name === dependencyName);
+  const option = dependency?.options?.find((item) => item.value === dependencyValue);
+  return option?.label || dependencyValue;
+}
+
+function renderConfigField(field, includeDependencyAttrs = true) {
+  return `
+    <div class="config-field ${field.name === "IMAGE_DASHBOARD_REMOTE_GARAGES" ? "config-field-wide" : ""}"${includeDependencyAttrs ? fieldDependencyAttrs(field) : ""}>
+      <span>${field.label}</span>
+      ${inputForField(field)}
+      ${field.live ? "" : '<small>Exige reinicio da aplicacao</small>'}
+    </div>
+  `;
+}
+
+function renderFieldGrid(fields, includeDependencyAttrs = true) {
+  if (!fields.length) return "";
+  return `
+    <div class="config-grid">
+      ${fields.map((field) => renderConfigField(field, includeDependencyAttrs)).join("")}
+    </div>
+  `;
+}
+
+function renderConfigGroup(groupFieldsList) {
+  const baseFields = groupFieldsList.filter((field) => !dependencyKey(field));
+  const dependentFields = groupFieldsList.filter((field) => dependencyKey(field));
+  const dependentGroups = dependentFields.reduce((groups, field) => {
+    const key = dependencyKey(field);
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(field);
+    return groups;
+  }, {});
+
+  return `
+    ${renderFieldGrid(baseFields)}
+    ${Object.values(dependentGroups).map((fields) => {
+      const firstField = fields[0];
+      return `
+        <div class="config-subsection"${fieldDependencyAttrs(firstField)}>
+          <h3>${escapeHtml(dependencyTitle(firstField))}</h3>
+          ${renderFieldGrid(fields, false)}
+        </div>
+      `;
+    }).join("")}
+  `;
+}
+
+function toggleConfigPanel(groupName, collapsed) {
+  if (collapsed) {
+    collapsedGroups.add(groupName);
+  } else {
+    collapsedGroups.delete(groupName);
+  }
+
+  const panel = Array.from(configForm.querySelectorAll("[data-config-group]"))
+    .find((item) => item.dataset.configGroup === groupName);
+  if (!panel) return;
+  panel.classList.toggle("is-collapsed", collapsed);
+  const button = panel.querySelector(".config-panel-toggle");
+  if (button) {
+    button.setAttribute("aria-expanded", String(!collapsed));
+    button.setAttribute("aria-label", collapsed ? "Expandir bloco" : "Recolher bloco");
+  }
+}
+
 function applyFieldVisibility() {
   configForm.querySelectorAll("[data-depends-on]").forEach((fieldBox) => {
     const dependencyName = fieldBox.dataset.dependsOn;
@@ -186,32 +305,36 @@ function applyFieldVisibility() {
 
 function renderConfig(fields) {
   const groups = groupFields(fields);
-  configForm.innerHTML = Object.entries(groups).map(([groupName, groupFieldsList]) => `
-    <section class="config-panel">
+  configForm.innerHTML = groups.map(([groupName, groupFieldsList]) => {
+    const isCollapsed = collapsedGroups.has(groupName);
+    return `
+    <section class="config-panel ${isCollapsed ? "is-collapsed" : ""}" data-config-group="${escapeHtml(groupName)}">
       <div class="panel-header">
         <div>
           <h2>${groupName}</h2>
         </div>
+        <button class="config-panel-toggle" type="button" aria-label="${isCollapsed ? "Expandir bloco" : "Recolher bloco"}" aria-expanded="${String(!isCollapsed)}"></button>
       </div>
-      <div class="config-grid">
-        ${groupFieldsList.map((field) => `
-          <div class="config-field ${field.name === "IMAGE_DASHBOARD_REMOTE_GARAGES" ? "config-field-wide" : ""}"${fieldDependencyAttrs(field)}>
-            <span>${field.label}</span>
-            ${inputForField(field)}
-            ${field.live ? "" : '<small>Exige reinicio da aplicacao</small>'}
-          </div>
-        `).join("")}
+      <div class="config-panel-body">
+        ${renderConfigGroup(groupFieldsList)}
       </div>
     </section>
-  `).join("");
+  `;
+  }).join("");
 
   document.querySelectorAll("[data-remote-editor]").forEach(setupRemoteGaragesField);
   configForm.onchange = applyFieldVisibility;
+  configForm.onclick = (event) => {
+    const toggleButton = event.target.closest(".config-panel-toggle");
+    if (!toggleButton) return;
+    const panel = toggleButton.closest("[data-config-group]");
+    if (!panel) return;
+    toggleConfigPanel(panel.dataset.configGroup, !panel.classList.contains("is-collapsed"));
+  };
   applyFieldVisibility();
 }
 
 async function loadConfig() {
-  hideConfigStatus();
   const response = await fetch("/api/config");
   const data = await response.json();
   if (!response.ok || data.status !== "ok") {
@@ -221,25 +344,41 @@ async function loadConfig() {
   renderConfig(configFields);
 }
 
-function collectValues() {
+function currentValueForField(field) {
+  const element = configForm.elements[field.name];
+  if (!element) return null;
+  return field.type === "bool" ? (element.checked ? "1" : "0") : element.value;
+}
+
+function collectChangedValues() {
   const values = {};
   document.querySelectorAll("[data-remote-editor]").forEach(syncRemoteGaragesValue);
   configFields.forEach((field) => {
-    const element = configForm.elements[field.name];
-    if (!element) return;
-    values[field.name] = field.type === "bool" ? (element.checked ? "1" : "0") : element.value;
+    const currentValue = currentValueForField(field);
+    if (currentValue === null) return;
+    if (String(currentValue) !== String(field.value ?? "")) {
+      values[field.name] = currentValue;
+    }
   });
   return values;
 }
 
 async function saveConfig() {
   saveConfigButton.disabled = true;
-  showConfigStatus("Salvando configuracoes...");
+  clearConfigToasts();
+  showConfigToast("Salvando configuracoes...", "info");
   try {
+    const changedValues = collectChangedValues();
+    if (!Object.keys(changedValues).length) {
+      clearConfigToasts();
+      showConfigToast("Nenhuma alteracao para salvar.", "success");
+      return;
+    }
+
     const response = await fetch("/api/config", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({values: collectValues()}),
+      body: JSON.stringify({values: changedValues}),
     });
     const data = await response.json();
     if (!response.ok || data.status !== "ok") {
@@ -247,13 +386,17 @@ async function saveConfig() {
     }
 
     const restartCount = (data.restart_required || []).length;
-    const suffix = restartCount
-      ? ` ${restartCount} item(ns) foram salvos, mas so entram em vigor apos reiniciar.`
-      : "";
-    showConfigStatus(`Configuracoes salvas.${suffix}`, restartCount ? "warning" : "success");
+    clearConfigToasts();
+    showConfigToast(
+      restartCount
+        ? "Configuracao salva e necessita de reinicializacao."
+        : "Configuracao salva.",
+      restartCount ? "warning" : "success",
+    );
     await loadConfig();
   } catch (error) {
-    showConfigStatus(error.message || "Falha ao salvar configuracoes.", "error");
+    clearConfigToasts();
+    showConfigToast(error.message || "Falha ao salvar.", "error");
   } finally {
     saveConfigButton.disabled = false;
   }
@@ -262,5 +405,5 @@ async function saveConfig() {
 saveConfigButton.addEventListener("click", saveConfig);
 
 loadConfig().catch((error) => {
-  showConfigStatus(error.message || "Falha ao carregar configuracoes.", "error");
+  showConfigToast(error.message || "Falha ao carregar configuracoes.", "error");
 });
