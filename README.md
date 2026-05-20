@@ -82,6 +82,8 @@ export IMAGE_DASHBOARD_AUTO_SCAN=1
 export IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS=300
 export IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS=300
 export IMAGE_DASHBOARD_ENABLE_DURATION=1
+export IMAGE_DASHBOARD_DURATION_MAX_ATTEMPTS=3
+export IMAGE_DASHBOARD_DURATION_RETRY_SECONDS=3600
 ```
 
 Use `0` em `IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS` ou `IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS` para desativar os agendadores.
@@ -116,6 +118,7 @@ Use `0` em `IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS` ou `IMAGE_DASHBOARD_DURATION_
 - Garagens remotas são verificadas a cada 2 minutos por padrão.
 - Garagens remotas são sincronizadas automaticamente a cada 3 minutos por padrão.
 - A duração dos vídeos é preenchida em background quando `ffprobe` está disponível.
+- Falhas de `ffprobe` ficam registradas no banco e são retentadas de forma limitada para a fila não ficar presa nos mesmos vídeos.
 - Veículos em alerta são aqueles sem imagens há 3 dias ou mais, ou sem nenhuma imagem registrada.
 
 ## Garagens Remotas
