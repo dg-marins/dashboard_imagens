@@ -46,6 +46,7 @@ from config import (
     DURATION_UPDATE_BATCH_SIZE,
     ENABLE_VIDEO_DURATION,
     EXPORT_XLSX_ENABLED,
+    DELETE_MISSING_AFTER_DAYS,
     FFPROBE_BINARY,
     FFPROBE_TIMEOUT_SECONDS,
     FULL_SCAN_INTERVAL_SECONDS,
@@ -197,6 +198,7 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "global": "INDEX_FILE_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de arquivos", "live": True},
     {"name": "IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "global": "INDEX_CAMERA_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de cameras", "live": True},
     {"name": "IMAGE_DASHBOARD_INDEX_RECENT_DAYS", "global": "INDEX_RECENT_DAYS", "type": "int", "group": "Indexacao", "label": "Priorizar ultimos N dias", "live": True},
+    {"name": "IMAGE_DASHBOARD_DELETE_MISSING_AFTER_DAYS", "global": "DELETE_MISSING_AFTER_DAYS", "type": "int", "group": "Indexacao", "label": "Remover ausentes apos N dias", "live": True},
     {"name": "IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "global": "SCAN_PROGRESS_EVERY_FILES", "type": "int", "group": "Indexacao", "label": "Atualizar progresso a cada N arquivos", "live": True},
     {"name": "IMAGE_DASHBOARD_ENABLE_DURATION", "global": "ENABLE_VIDEO_DURATION", "type": "bool", "group": "Videos", "label": "Coletar duracao", "live": True},
     {"name": "IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "global": "DURATION_INTERVAL_SECONDS", "type": "int", "group": "Videos", "label": "Intervalo da fila de duracao (s)", "live": True},
@@ -593,6 +595,7 @@ def ensure_database_schema() -> None:
                     duration_probe_at TEXT,
                     modified_at TEXT,
                     indexed_at TEXT NOT NULL,
+                    missing_since TEXT,
                     last_seen_scan_id TEXT
                 );
 
@@ -616,6 +619,7 @@ def ensure_database_schema() -> None:
                     source_dir TEXT NOT NULL UNIQUE,
                     real_dir TEXT NOT NULL,
                     indexed_at TEXT NOT NULL,
+                    missing_since TEXT,
                     last_seen_scan_id TEXT
                 );
 
@@ -664,7 +668,8 @@ def ensure_database_schema() -> None:
                     duration_probe_error TEXT,
                     duration_probe_at TEXT,
                     modified_at TEXT,
-                    indexed_at TEXT NOT NULL
+                    indexed_at TEXT NOT NULL,
+                    missing_since TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_indexed_files_month
@@ -686,7 +691,8 @@ def ensure_database_schema() -> None:
                     camera TEXT NOT NULL,
                     source_dir TEXT NOT NULL UNIQUE,
                     real_dir TEXT NOT NULL,
-                    indexed_at TEXT NOT NULL
+                    indexed_at TEXT NOT NULL,
+                    missing_since TEXT
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_camera_inventory_vehicle_camera
@@ -719,8 +725,10 @@ def ensure_database_schema() -> None:
         ensure_column(connection, "indexed_files", "duration_probe_attempts", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(connection, "indexed_files", "duration_probe_error", "TEXT")
         ensure_column(connection, "indexed_files", "duration_probe_at", "TEXT")
+        ensure_column(connection, "indexed_files", "missing_since", "TEXT")
         ensure_column(connection, "camera_inventory", "garage", "TEXT NOT NULL DEFAULT 'G1'")
         ensure_column(connection, "camera_inventory", "last_seen_scan_id", "TEXT")
+        ensure_column(connection, "camera_inventory", "missing_since", "TEXT")
         connection.executescript(
             """
             CREATE INDEX IF NOT EXISTS idx_vehicle_camera_day_summary_month
@@ -1064,13 +1072,34 @@ def update_duration_state(**kwargs: object) -> None:
 def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None:
     if not batch:
         return
-    same_file_condition = (
-        "indexed_files.size_bytes IS NOT DISTINCT FROM excluded.size_bytes "
-        "AND indexed_files.modified_at IS NOT DISTINCT FROM excluded.modified_at"
-        if is_postgres()
-        else "indexed_files.size_bytes IS excluded.size_bytes "
-        "AND indexed_files.modified_at IS excluded.modified_at"
-    )
+    if is_postgres():
+        same_file_condition = (
+            "indexed_files.garage IS NOT DISTINCT FROM excluded.garage "
+            "AND indexed_files.vehicle IS NOT DISTINCT FROM excluded.vehicle "
+            "AND indexed_files.camera IS NOT DISTINCT FROM excluded.camera "
+            "AND indexed_files.capture_date IS NOT DISTINCT FROM excluded.capture_date "
+            "AND indexed_files.file_name IS NOT DISTINCT FROM excluded.file_name "
+            "AND indexed_files.extension IS NOT DISTINCT FROM excluded.extension "
+            "AND indexed_files.relative_dir IS NOT DISTINCT FROM excluded.relative_dir "
+            "AND indexed_files.source_path IS NOT DISTINCT FROM excluded.source_path "
+            "AND indexed_files.real_path IS NOT DISTINCT FROM excluded.real_path "
+            "AND indexed_files.size_bytes IS NOT DISTINCT FROM excluded.size_bytes "
+            "AND indexed_files.modified_at IS NOT DISTINCT FROM excluded.modified_at"
+        )
+    else:
+        same_file_condition = (
+            "indexed_files.garage IS excluded.garage "
+            "AND indexed_files.vehicle IS excluded.vehicle "
+            "AND indexed_files.camera IS excluded.camera "
+            "AND indexed_files.capture_date IS excluded.capture_date "
+            "AND indexed_files.file_name IS excluded.file_name "
+            "AND indexed_files.extension IS excluded.extension "
+            "AND indexed_files.relative_dir IS excluded.relative_dir "
+            "AND indexed_files.source_path IS excluded.source_path "
+            "AND indexed_files.real_path IS excluded.real_path "
+            "AND indexed_files.size_bytes IS excluded.size_bytes "
+            "AND indexed_files.modified_at IS excluded.modified_at"
+        )
     connection.executemany(
         f"""
         INSERT INTO indexed_files (
@@ -1088,19 +1117,20 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
             duration_seconds,
             modified_at,
             indexed_at,
+            missing_since,
             last_seen_scan_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
         ON CONFLICT(relative_file_path) DO UPDATE SET
-            garage = excluded.garage,
-            vehicle = excluded.vehicle,
-            camera = excluded.camera,
-            capture_date = excluded.capture_date,
-            file_name = excluded.file_name,
-            extension = excluded.extension,
-            relative_dir = excluded.relative_dir,
-            source_path = excluded.source_path,
-            real_path = excluded.real_path,
-            size_bytes = excluded.size_bytes,
+            garage = CASE WHEN {same_file_condition} THEN indexed_files.garage ELSE excluded.garage END,
+            vehicle = CASE WHEN {same_file_condition} THEN indexed_files.vehicle ELSE excluded.vehicle END,
+            camera = CASE WHEN {same_file_condition} THEN indexed_files.camera ELSE excluded.camera END,
+            capture_date = CASE WHEN {same_file_condition} THEN indexed_files.capture_date ELSE excluded.capture_date END,
+            file_name = CASE WHEN {same_file_condition} THEN indexed_files.file_name ELSE excluded.file_name END,
+            extension = CASE WHEN {same_file_condition} THEN indexed_files.extension ELSE excluded.extension END,
+            relative_dir = CASE WHEN {same_file_condition} THEN indexed_files.relative_dir ELSE excluded.relative_dir END,
+            source_path = CASE WHEN {same_file_condition} THEN indexed_files.source_path ELSE excluded.source_path END,
+            real_path = CASE WHEN {same_file_condition} THEN indexed_files.real_path ELSE excluded.real_path END,
+            size_bytes = CASE WHEN {same_file_condition} THEN indexed_files.size_bytes ELSE excluded.size_bytes END,
             duration_seconds = CASE
                 WHEN {same_file_condition}
                 THEN indexed_files.duration_seconds
@@ -1121,8 +1151,9 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
                 THEN indexed_files.duration_probe_at
                 ELSE NULL
             END,
-            modified_at = excluded.modified_at,
-            indexed_at = excluded.indexed_at,
+            modified_at = CASE WHEN {same_file_condition} THEN indexed_files.modified_at ELSE excluded.modified_at END,
+            indexed_at = CASE WHEN {same_file_condition} THEN indexed_files.indexed_at ELSE excluded.indexed_at END,
+            missing_since = NULL,
             last_seen_scan_id = excluded.last_seen_scan_id
         """,
         batch,
@@ -1134,8 +1165,19 @@ def flush_file_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None
 def flush_camera_batch(connection: sqlite3.Connection, batch: List[tuple]) -> None:
     if not batch:
         return
+    same_camera_condition = (
+        "camera_inventory.garage IS NOT DISTINCT FROM excluded.garage "
+        "AND camera_inventory.vehicle IS NOT DISTINCT FROM excluded.vehicle "
+        "AND camera_inventory.camera IS NOT DISTINCT FROM excluded.camera "
+        "AND camera_inventory.real_dir IS NOT DISTINCT FROM excluded.real_dir"
+        if is_postgres()
+        else "camera_inventory.garage IS excluded.garage "
+        "AND camera_inventory.vehicle IS excluded.vehicle "
+        "AND camera_inventory.camera IS excluded.camera "
+        "AND camera_inventory.real_dir IS excluded.real_dir"
+    )
     connection.executemany(
-        """
+        f"""
         INSERT INTO camera_inventory (
             garage,
             vehicle,
@@ -1143,14 +1185,16 @@ def flush_camera_batch(connection: sqlite3.Connection, batch: List[tuple]) -> No
             source_dir,
             real_dir,
             indexed_at,
+            missing_since,
             last_seen_scan_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
         ON CONFLICT(source_dir) DO UPDATE SET
-            garage = excluded.garage,
-            vehicle = excluded.vehicle,
-            camera = excluded.camera,
-            real_dir = excluded.real_dir,
-            indexed_at = excluded.indexed_at,
+            garage = CASE WHEN {same_camera_condition} THEN camera_inventory.garage ELSE excluded.garage END,
+            vehicle = CASE WHEN {same_camera_condition} THEN camera_inventory.vehicle ELSE excluded.vehicle END,
+            camera = CASE WHEN {same_camera_condition} THEN camera_inventory.camera ELSE excluded.camera END,
+            real_dir = CASE WHEN {same_camera_condition} THEN camera_inventory.real_dir ELSE excluded.real_dir END,
+            indexed_at = CASE WHEN {same_camera_condition} THEN camera_inventory.indexed_at ELSE excluded.indexed_at END,
+            missing_since = NULL,
             last_seen_scan_id = excluded.last_seen_scan_id
         """,
         batch,
@@ -1159,10 +1203,93 @@ def flush_camera_batch(connection: sqlite3.Connection, batch: List[tuple]) -> No
     batch.clear()
 
 
+def missing_cutoff_iso(now_value: str) -> str:
+    days = max(0, DELETE_MISSING_AFTER_DAYS)
+    return (datetime.fromisoformat(now_value) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
+def mark_missing_indexed_files(
+    connection: sqlite3.Connection,
+    garage: str,
+    scan_id: str,
+    missing_since: str,
+    cutoff: str,
+    dates: Optional[set] = None,
+    vehicle: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> int:
+    clauses = ["garage = ?", "COALESCE(last_seen_scan_id, '') != ?"]
+    params: List[object] = [garage, scan_id]
+    if dates:
+        clauses.append(f"capture_date IN ({', '.join('?' for _ in dates)})")
+        params.extend(sorted(dates))
+    if vehicle:
+        clauses.append("vehicle = ?")
+        params.append(vehicle)
+    if start_date and end_date:
+        clauses.append("capture_date >= ?")
+        clauses.append("capture_date < ?")
+        params.extend([start_date, end_date])
+    where_sql = " AND ".join(clauses)
+
+    connection.execute(
+        f"""
+        UPDATE indexed_files
+        SET missing_since = COALESCE(missing_since, ?)
+        WHERE {where_sql}
+        """,
+        [missing_since, *params],
+    )
+    if DELETE_MISSING_AFTER_DAYS < 0:
+        return 0
+    return connection.execute(
+        f"""
+        DELETE FROM indexed_files
+        WHERE {where_sql}
+          AND missing_since IS NOT NULL
+          AND missing_since <= ?
+        """,
+        [*params, cutoff],
+    ).rowcount
+
+
+def mark_missing_cameras(
+    connection: sqlite3.Connection,
+    garage: str,
+    scan_id: str,
+    missing_since: str,
+    cutoff: str,
+) -> int:
+    connection.execute(
+        """
+        UPDATE camera_inventory
+        SET missing_since = COALESCE(missing_since, ?)
+        WHERE garage = ?
+          AND COALESCE(last_seen_scan_id, '') != ?
+        """,
+        (missing_since, garage, scan_id),
+    )
+    if DELETE_MISSING_AFTER_DAYS < 0:
+        return 0
+    return connection.execute(
+        """
+        DELETE FROM camera_inventory
+        WHERE garage = ?
+          AND COALESCE(last_seen_scan_id, '') != ?
+          AND missing_since IS NOT NULL
+          AND missing_since <= ?
+        """,
+        (garage, scan_id, cutoff),
+    ).rowcount
+
+
 def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
     ensure_database()
     started_at = iso_now()
     indexed_at = iso_now()
+    missing_since = iso_now()
+    missing_cutoff = missing_cutoff_iso(missing_since)
     total_files = 0
     total_cameras = 0
 
@@ -1175,18 +1302,13 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         set_metadata(connection, "image_root", str(IMAGE_ROOT))
         connection.commit()
 
-        if full_refresh:
-            connection.execute("DELETE FROM indexed_files WHERE garage = ?", (LOCAL_GARAGE,))
-            connection.execute("DELETE FROM camera_inventory WHERE garage = ?", (LOCAL_GARAGE,))
-            connection.execute("DELETE FROM vehicle_camera_day_summary WHERE garage = ?", (LOCAL_GARAGE,))
-            connection.commit()
-
         file_batch: List[tuple] = []
         camera_batch: List[tuple] = []
         seen_vehicle_targets = set()
         seen_camera_targets = set()
         seen_day_targets = set()
         seen_capture_dates = set()
+        processed_capture_dates = set()
         recent_capture_dates = set()
         published_dates = set()
         day_tasks: List[tuple] = []
@@ -1339,15 +1461,14 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
             if not dates_to_publish:
                 return
             flush_file_batch(connection, file_batch)
-            placeholders = ", ".join("?" for _ in dates_to_publish)
-            connection.execute(
-                f"""
-                DELETE FROM indexed_files
-                WHERE garage = ?
-                  AND capture_date IN ({placeholders})
-                  AND COALESCE(last_seen_scan_id, '') != ?
-                """,
-                [LOCAL_GARAGE, *sorted(dates_to_publish), scan_id],
+            processed_capture_dates.update(dates_to_publish)
+            mark_missing_indexed_files(
+                connection,
+                LOCAL_GARAGE,
+                scan_id,
+                missing_since,
+                missing_cutoff,
+                dates=dates_to_publish,
             )
             rebuild_summary_for_dates(connection, LOCAL_GARAGE, dates_to_publish)
             connection.commit()
@@ -1361,15 +1482,15 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
 
         def publish_scan_vehicle_date(vehicle_name: str, capture_date_name: str, recent_ready: bool = False) -> None:
             flush_file_batch(connection, file_batch)
-            connection.execute(
-                """
-                DELETE FROM indexed_files
-                WHERE garage = ?
-                  AND vehicle = ?
-                  AND capture_date = ?
-                  AND COALESCE(last_seen_scan_id, '') != ?
-                """,
-                (LOCAL_GARAGE, vehicle_name, capture_date_name, scan_id),
+            processed_capture_dates.add(capture_date_name)
+            mark_missing_indexed_files(
+                connection,
+                LOCAL_GARAGE,
+                scan_id,
+                missing_since,
+                missing_cutoff,
+                dates={capture_date_name},
+                vehicle=vehicle_name,
             )
             rebuild_summary_for_vehicle_date(connection, LOCAL_GARAGE, vehicle_name, capture_date_name)
             connection.commit()
@@ -1400,40 +1521,55 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         flush_camera_batch(connection, camera_batch)
         flush_file_batch(connection, file_batch)
 
-        if full_refresh:
-            deleted_files = connection.execute(
-                "DELETE FROM indexed_files WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
-                (LOCAL_GARAGE, scan_id),
-            ).rowcount
-        elif seen_capture_dates:
-            placeholders = ", ".join("?" for _ in seen_capture_dates)
-            deleted_files = connection.execute(
-                f"""
-                DELETE FROM indexed_files
-                WHERE garage = ?
-                  AND capture_date IN ({placeholders})
-                  AND COALESCE(last_seen_scan_id, '') != ?
-                """,
-                [LOCAL_GARAGE, *sorted(seen_capture_dates), scan_id],
-            ).rowcount
+        cleanup_dates = seen_capture_dates if full_refresh else processed_capture_dates
+
+        if full_refresh and cleanup_dates:
+            deleted_files = mark_missing_indexed_files(
+                connection,
+                LOCAL_GARAGE,
+                scan_id,
+                missing_since,
+                missing_cutoff,
+            )
+        elif cleanup_dates:
+            deleted_files = mark_missing_indexed_files(
+                connection,
+                LOCAL_GARAGE,
+                scan_id,
+                missing_since,
+                missing_cutoff,
+                dates=cleanup_dates,
+            )
         else:
             deleted_files = 0
-        deleted_cameras = connection.execute(
-            "DELETE FROM camera_inventory WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
-            (LOCAL_GARAGE, scan_id),
-        ).rowcount
-        if full_refresh and seen_capture_dates:
-            placeholders = ", ".join("?" for _ in seen_capture_dates)
+        if seen_camera_targets:
+            deleted_cameras = mark_missing_cameras(
+                connection,
+                LOCAL_GARAGE,
+                scan_id,
+                missing_since,
+                missing_cutoff,
+            )
+        else:
+            deleted_cameras = 0
+        if full_refresh and cleanup_dates:
             connection.execute(
-                f"""
+                """
                 DELETE FROM vehicle_camera_day_summary
                 WHERE garage = ?
-                  AND capture_date NOT IN ({placeholders})
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM indexed_files
+                      WHERE indexed_files.garage = vehicle_camera_day_summary.garage
+                        AND indexed_files.vehicle = vehicle_camera_day_summary.vehicle
+                        AND indexed_files.camera = vehicle_camera_day_summary.camera
+                        AND indexed_files.capture_date = vehicle_camera_day_summary.capture_date
+                  )
                 """,
-                [LOCAL_GARAGE, *sorted(seen_capture_dates)],
+                (LOCAL_GARAGE,),
             )
-            rebuild_summary_for_dates(connection, LOCAL_GARAGE, seen_capture_dates)
-        elif full_refresh:
+            rebuild_summary_for_dates(connection, LOCAL_GARAGE, cleanup_dates)
+        elif full_refresh and seen_day_targets:
             connection.execute(
                 "DELETE FROM vehicle_camera_day_summary WHERE garage = ?",
                 (LOCAL_GARAGE,),
@@ -2255,26 +2391,26 @@ def upsert_remote_export(
 
         deleted_files = 0
         deleted_cameras = 0
+        missing_since = iso_now()
+        missing_cutoff = missing_cutoff_iso(missing_since)
         if prune and start_date and end_date:
-            deleted_files = connection.execute(
-                """
-                DELETE FROM indexed_files
-                WHERE garage = ?
-                  AND capture_date >= ?
-                  AND capture_date < ?
-                  AND COALESCE(last_seen_scan_id, '') != ?
-                """,
-                (expected_garage, start_date, end_date, sync_id),
-            ).rowcount
+            deleted_files = mark_missing_indexed_files(
+                connection,
+                expected_garage,
+                sync_id,
+                missing_since,
+                missing_cutoff,
+                start_date=start_date,
+                end_date=end_date,
+            )
         if prune:
-            deleted_cameras = connection.execute(
-                """
-                DELETE FROM camera_inventory
-                WHERE garage = ?
-                  AND COALESCE(last_seen_scan_id, '') != ?
-                """,
-                (expected_garage, sync_id),
-            ).rowcount
+            deleted_cameras = mark_missing_cameras(
+                connection,
+                expected_garage,
+                sync_id,
+                missing_since,
+                missing_cutoff,
+            )
         if rebuild_summary:
             if prune and start_date and end_date:
                 rebuild_summary_for_range(connection, expected_garage, start_date, end_date)
@@ -2295,24 +2431,18 @@ def upsert_remote_export(
 
 def prune_remote_sync(garage: str, sync_id: str, start_date: str, end_date: str) -> dict:
     with open_db() as connection:
-        deleted_files = connection.execute(
-            """
-            DELETE FROM indexed_files
-            WHERE garage = ?
-              AND capture_date >= ?
-              AND capture_date < ?
-              AND COALESCE(last_seen_scan_id, '') != ?
-            """,
-            (garage, start_date, end_date, sync_id),
-        ).rowcount
-        deleted_cameras = connection.execute(
-            """
-            DELETE FROM camera_inventory
-            WHERE garage = ?
-              AND COALESCE(last_seen_scan_id, '') != ?
-            """,
-            (garage, sync_id),
-        ).rowcount
+        missing_since = iso_now()
+        missing_cutoff = missing_cutoff_iso(missing_since)
+        deleted_files = mark_missing_indexed_files(
+            connection,
+            garage,
+            sync_id,
+            missing_since,
+            missing_cutoff,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        deleted_cameras = mark_missing_cameras(connection, garage, sync_id, missing_since, missing_cutoff)
         rebuild_summary_for_range(connection, garage, start_date, end_date)
         connection.commit()
         invalidate_dashboard_cache()
