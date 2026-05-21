@@ -48,10 +48,12 @@ from config import (
     EXPORT_XLSX_ENABLED,
     FFPROBE_BINARY,
     FFPROBE_TIMEOUT_SECONDS,
+    FULL_SCAN_INTERVAL_SECONDS,
     HOST,
     IMAGE_ROOT,
     INDEX_CAMERA_BATCH_SIZE,
     INDEX_FILE_BATCH_SIZE,
+    INDEX_RECENT_DAYS,
     LOCAL_GARAGE,
     MYSQL_DB,
     MYSQL_HOST,
@@ -115,6 +117,12 @@ SCAN_STATE = {
     "files_scanned": 0,
     "current_vehicle": None,
     "current_camera": None,
+    "current_date": None,
+    "phase": None,
+    "days_scanned": 0,
+    "published_dates": 0,
+    "last_published_at": None,
+    "recent_ready": False,
 }
 DURATION_LOCK = threading.Lock()
 DURATION_STATE = {
@@ -150,6 +158,8 @@ SCHEDULERS_STARTED = set()
 DASHBOARD_CACHE_LOCK = threading.Lock()
 DASHBOARD_BUILD_LOCK = threading.Lock()
 DASHBOARD_CACHE: Dict[str, Tuple[float, dict]] = {}
+DATABASE_READY_LOCK = threading.Lock()
+DATABASE_READY = False
 
 CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_ROOT", "global": "IMAGE_ROOT", "type": "path", "group": "Arquivos", "label": "Diretorio de imagens", "live": True},
@@ -182,9 +192,11 @@ CONFIG_FIELDS = [
     {"name": "IMAGE_DASHBOARD_PORT", "global": "PORT", "type": "int", "group": "Servidor", "label": "Porta", "live": False},
     {"name": "IMAGE_DASHBOARD_AUTO_SCAN", "global": "AUTO_SCAN_ON_START", "type": "bool", "group": "Indexacao", "label": "Indexar ao iniciar", "live": True},
     {"name": "IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS", "global": "SCAN_INTERVAL_SECONDS", "type": "int", "group": "Indexacao", "label": "Intervalo de indexacao (s)", "live": True},
+    {"name": "IMAGE_DASHBOARD_FULL_SCAN_INTERVAL_SECONDS", "global": "FULL_SCAN_INTERVAL_SECONDS", "type": "int", "group": "Indexacao", "label": "Intervalo de historico (s)", "live": True},
     {"name": "IMAGE_DASHBOARD_SCAN_SORT_ENTRIES", "global": "SCAN_SORT_ENTRIES", "type": "bool", "group": "Indexacao", "label": "Ordenar arquivos na varredura", "live": True},
     {"name": "IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "global": "INDEX_FILE_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de arquivos", "live": True},
     {"name": "IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "global": "INDEX_CAMERA_BATCH_SIZE", "type": "int", "group": "Indexacao", "label": "Lote de cameras", "live": True},
+    {"name": "IMAGE_DASHBOARD_INDEX_RECENT_DAYS", "global": "INDEX_RECENT_DAYS", "type": "int", "group": "Indexacao", "label": "Priorizar ultimos N dias", "live": True},
     {"name": "IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "global": "SCAN_PROGRESS_EVERY_FILES", "type": "int", "group": "Indexacao", "label": "Atualizar progresso a cada N arquivos", "live": True},
     {"name": "IMAGE_DASHBOARD_ENABLE_DURATION", "global": "ENABLE_VIDEO_DURATION", "type": "bool", "group": "Videos", "label": "Coletar duracao", "live": True},
     {"name": "IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS", "global": "DURATION_INTERVAL_SECONDS", "type": "int", "group": "Videos", "label": "Intervalo da fila de duracao (s)", "live": True},
@@ -547,6 +559,17 @@ def ensure_column(connection, table_name: str, column_name: str, column_sql: str
 
 
 def ensure_database() -> None:
+    global DATABASE_READY
+    if DATABASE_READY:
+        return
+    with DATABASE_READY_LOCK:
+        if DATABASE_READY:
+            return
+        ensure_database_schema()
+        DATABASE_READY = True
+
+
+def ensure_database_schema() -> None:
     with open_db() as connection:
         if is_postgres():
             connection.executescript(
@@ -807,6 +830,53 @@ def rebuild_summary_for_dates(connection: sqlite3.Connection, garage: str, dates
         )
 
 
+def rebuild_summary_for_vehicle_date(
+    connection: sqlite3.Connection,
+    garage: str,
+    vehicle: str,
+    capture_date: str,
+) -> None:
+    updated_at = iso_now()
+    connection.execute(
+        """
+        DELETE FROM vehicle_camera_day_summary
+        WHERE garage = ?
+          AND vehicle = ?
+          AND capture_date = ?
+        """,
+        (garage, vehicle, capture_date),
+    )
+    connection.execute(
+        """
+        INSERT INTO vehicle_camera_day_summary (
+            garage,
+            vehicle,
+            camera,
+            capture_date,
+            total_files,
+            total_size_bytes,
+            latest_file,
+            updated_at
+        )
+        SELECT
+            garage,
+            vehicle,
+            camera,
+            capture_date,
+            COUNT(*) AS total_files,
+            COALESCE(SUM(size_bytes), 0) AS total_size_bytes,
+            MAX(file_name) AS latest_file,
+            ? AS updated_at
+        FROM indexed_files
+        WHERE garage = ?
+          AND vehicle = ?
+          AND capture_date = ?
+        GROUP BY garage, vehicle, camera, capture_date
+        """,
+        (updated_at, garage, vehicle, capture_date),
+    )
+
+
 def rebuild_summary_for_range(connection: sqlite3.Connection, garage: str, start_date: str, end_date: str) -> None:
     updated_at = iso_now()
     connection.execute(
@@ -905,6 +975,13 @@ def safe_scandir(path: Path) -> List[os.DirEntry]:
             return items
     except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
         return []
+
+
+def parse_capture_date(value: str) -> Optional[date]:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def has_ffprobe() -> bool:
@@ -1110,6 +1187,14 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
         seen_camera_targets = set()
         seen_day_targets = set()
         seen_capture_dates = set()
+        recent_capture_dates = set()
+        published_dates = set()
+        day_tasks: List[tuple] = []
+        recent_cutoff = (
+            date.today() - timedelta(days=max(INDEX_RECENT_DAYS, 1) - 1)
+            if INDEX_RECENT_DAYS > 0
+            else None
+        )
 
         for vehicle_entry in safe_scandir(IMAGE_ROOT):
             if not vehicle_entry.is_dir(follow_symlinks=True):
@@ -1122,7 +1207,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
             seen_vehicle_targets.add(vehicle_real)
 
             vehicle_name = vehicle_entry.name
-            update_scan_state(current_vehicle=vehicle_name, current_camera=None)
+            update_scan_state(phase="descobrindo", current_vehicle=vehicle_name, current_camera=None)
 
             for camera_entry in safe_scandir(vehicle_path):
                 if not camera_entry.is_dir(follow_symlinks=True):
@@ -1167,71 +1252,177 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
                         continue
                     seen_day_targets.add(day_real)
                     seen_capture_dates.add(day_entry.name)
-
-                    relative_dir = f"{vehicle_name}/{camera_name}/{day_entry.name}"
-
-                    for file_entry in safe_scandir(day_path):
-                        if not file_entry.is_file(follow_symlinks=True):
-                            continue
-                        if not TIMESTAMP_FILE_PATTERN.match(file_entry.name):
-                            continue
-
-                        stat_info = None
-                        try:
-                            stat_info = file_entry.stat(follow_symlinks=True)
-                        except (FileNotFoundError, PermissionError, OSError):
-                            stat_info = None
-
-                        file_source_path = file_entry.path
-                        file_name = file_entry.name
-                        total_files += 1
-                        file_batch.append(
-                            (
-                                LOCAL_GARAGE,
-                                vehicle_name,
-                                camera_name,
-                                day_entry.name,
-                                file_name,
-                                os.path.splitext(file_name)[1].lower() or "[sem_ext]",
-                                relative_dir,
-                                    f"{LOCAL_GARAGE}/{relative_dir}/{file_name}",
-                                file_source_path,
-                                str(Path(day_real) / file_name),
-                                stat_info.st_size if stat_info else None,
-                                None,
-                                (
-                                    datetime.fromtimestamp(stat_info.st_mtime).isoformat(timespec="seconds")
-                                    if stat_info
-                                    else None
-                                ),
-                                indexed_at,
-                                scan_id,
-                            )
+                    capture_date = parse_capture_date(day_entry.name)
+                    is_recent = bool(recent_cutoff and capture_date and capture_date >= recent_cutoff)
+                    day_tasks.append(
+                        (
+                            0 if is_recent else 1,
+                            capture_date or date.min,
+                            vehicle_name,
+                            camera_name,
+                            day_entry.name,
+                            day_path,
+                            day_real,
                         )
-                        if SCAN_PROGRESS_EVERY_FILES > 0 and total_files % SCAN_PROGRESS_EVERY_FILES == 0:
-                            update_scan_state(
-                                files_scanned=total_files,
-                                cameras_scanned=total_cameras,
-                                current_vehicle=vehicle_name,
-                                current_camera=camera_name,
-                            )
-                        if len(file_batch) >= INDEX_FILE_BATCH_SIZE:
-                            flush_file_batch(connection, file_batch)
+                    )
 
             update_scan_state(vehicles_scanned=len(seen_vehicle_targets))
 
         flush_camera_batch(connection, camera_batch)
+
+        if recent_cutoff:
+            day_tasks.sort(key=lambda task: (task[0], -task[1].toordinal()))
+
+        def process_day_task(task: tuple, phase: str) -> None:
+            nonlocal total_files
+            _, _, vehicle_name, camera_name, capture_date_name, day_path, day_real = task
+            relative_dir = f"{vehicle_name}/{camera_name}/{capture_date_name}"
+            update_scan_state(
+                phase=phase,
+                current_vehicle=vehicle_name,
+                current_camera=camera_name,
+                current_date=capture_date_name,
+            )
+
+            for file_entry in safe_scandir(day_path):
+                if not file_entry.is_file(follow_symlinks=True):
+                    continue
+                if not TIMESTAMP_FILE_PATTERN.match(file_entry.name):
+                    continue
+
+                stat_info = None
+                try:
+                    stat_info = file_entry.stat(follow_symlinks=True)
+                except (FileNotFoundError, PermissionError, OSError):
+                    stat_info = None
+
+                file_source_path = file_entry.path
+                file_name = file_entry.name
+                total_files += 1
+                file_batch.append(
+                    (
+                        LOCAL_GARAGE,
+                        vehicle_name,
+                        camera_name,
+                        capture_date_name,
+                        file_name,
+                        os.path.splitext(file_name)[1].lower() or "[sem_ext]",
+                        relative_dir,
+                        f"{LOCAL_GARAGE}/{relative_dir}/{file_name}",
+                        file_source_path,
+                        str(Path(day_real) / file_name),
+                        stat_info.st_size if stat_info else None,
+                        None,
+                        (
+                            datetime.fromtimestamp(stat_info.st_mtime).isoformat(timespec="seconds")
+                            if stat_info
+                            else None
+                        ),
+                        indexed_at,
+                        scan_id,
+                    )
+                )
+                if SCAN_PROGRESS_EVERY_FILES > 0 and total_files % SCAN_PROGRESS_EVERY_FILES == 0:
+                    update_scan_state(
+                        files_scanned=total_files,
+                        cameras_scanned=total_cameras,
+                        current_vehicle=vehicle_name,
+                        current_camera=camera_name,
+                    )
+                if len(file_batch) >= INDEX_FILE_BATCH_SIZE:
+                    flush_file_batch(connection, file_batch)
+
+        recent_tasks = [task for task in day_tasks if task[0] == 0]
+        history_tasks = [task for task in day_tasks if task[0] != 0] if full_refresh else []
+
+        def publish_scan_dates(dates_to_publish: set, recent_ready: bool = False) -> None:
+            if not dates_to_publish:
+                return
+            flush_file_batch(connection, file_batch)
+            placeholders = ", ".join("?" for _ in dates_to_publish)
+            connection.execute(
+                f"""
+                DELETE FROM indexed_files
+                WHERE garage = ?
+                  AND capture_date IN ({placeholders})
+                  AND COALESCE(last_seen_scan_id, '') != ?
+                """,
+                [LOCAL_GARAGE, *sorted(dates_to_publish), scan_id],
+            )
+            rebuild_summary_for_dates(connection, LOCAL_GARAGE, dates_to_publish)
+            connection.commit()
+            invalidate_dashboard_cache()
+            published_dates.update(dates_to_publish)
+            update_scan_state(
+                published_dates=len(published_dates),
+                last_published_at=iso_now(),
+                recent_ready=recent_ready or bool(get_scan_status().get("recent_ready")),
+            )
+
+        def publish_scan_vehicle_date(vehicle_name: str, capture_date_name: str, recent_ready: bool = False) -> None:
+            flush_file_batch(connection, file_batch)
+            connection.execute(
+                """
+                DELETE FROM indexed_files
+                WHERE garage = ?
+                  AND vehicle = ?
+                  AND capture_date = ?
+                  AND COALESCE(last_seen_scan_id, '') != ?
+                """,
+                (LOCAL_GARAGE, vehicle_name, capture_date_name, scan_id),
+            )
+            rebuild_summary_for_vehicle_date(connection, LOCAL_GARAGE, vehicle_name, capture_date_name)
+            connection.commit()
+            invalidate_dashboard_cache()
+            published_dates.add(capture_date_name)
+            update_scan_state(
+                published_dates=len(published_dates),
+                last_published_at=iso_now(),
+                recent_ready=recent_ready or bool(get_scan_status().get("recent_ready")),
+            )
+
+        for day_index, task in enumerate(recent_tasks, start=1):
+            process_day_task(task, "recentes")
+            recent_capture_dates.add(task[4])
+            update_scan_state(days_scanned=day_index)
+            next_task = recent_tasks[day_index] if day_index < len(recent_tasks) else None
+            if not next_task or next_task[2] != task[2] or next_task[4] != task[4]:
+                publish_scan_vehicle_date(task[2], task[4], recent_ready=day_index == len(recent_tasks))
+
+        for offset, task in enumerate(history_tasks, start=len(recent_tasks) + 1):
+            process_day_task(task, "historico")
+            update_scan_state(days_scanned=offset)
+            next_index = offset - len(recent_tasks)
+            next_task = history_tasks[next_index] if next_index < len(history_tasks) else None
+            if not next_task or next_task[4] != task[4]:
+                publish_scan_dates({task[4]})
+
+        flush_camera_batch(connection, camera_batch)
         flush_file_batch(connection, file_batch)
 
-        deleted_files = connection.execute(
-            "DELETE FROM indexed_files WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
-            (LOCAL_GARAGE, scan_id),
-        ).rowcount
+        if full_refresh:
+            deleted_files = connection.execute(
+                "DELETE FROM indexed_files WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
+                (LOCAL_GARAGE, scan_id),
+            ).rowcount
+        elif seen_capture_dates:
+            placeholders = ", ".join("?" for _ in seen_capture_dates)
+            deleted_files = connection.execute(
+                f"""
+                DELETE FROM indexed_files
+                WHERE garage = ?
+                  AND capture_date IN ({placeholders})
+                  AND COALESCE(last_seen_scan_id, '') != ?
+                """,
+                [LOCAL_GARAGE, *sorted(seen_capture_dates), scan_id],
+            ).rowcount
+        else:
+            deleted_files = 0
         deleted_cameras = connection.execute(
             "DELETE FROM camera_inventory WHERE garage = ? AND COALESCE(last_seen_scan_id, '') != ?",
             (LOCAL_GARAGE, scan_id),
         ).rowcount
-        if seen_capture_dates:
+        if full_refresh and seen_capture_dates:
             placeholders = ", ".join("?" for _ in seen_capture_dates)
             connection.execute(
                 f"""
@@ -1242,7 +1433,7 @@ def refresh_index(scan_id: str, full_refresh: bool = False) -> dict:
                 [LOCAL_GARAGE, *sorted(seen_capture_dates)],
             )
             rebuild_summary_for_dates(connection, LOCAL_GARAGE, seen_capture_dates)
-        else:
+        elif full_refresh:
             connection.execute(
                 "DELETE FROM vehicle_camera_day_summary WHERE garage = ?",
                 (LOCAL_GARAGE,),
@@ -1549,6 +1740,12 @@ def start_scan(full_refresh: bool = False) -> dict:
         SCAN_STATE["files_scanned"] = 0
         SCAN_STATE["current_vehicle"] = None
         SCAN_STATE["current_camera"] = None
+        SCAN_STATE["current_date"] = None
+        SCAN_STATE["phase"] = None
+        SCAN_STATE["days_scanned"] = 0
+        SCAN_STATE["published_dates"] = 0
+        SCAN_STATE["last_published_at"] = None
+        SCAN_STATE["recent_ready"] = False
 
     worker = threading.Thread(
         target=run_scan_job,
@@ -1574,6 +1771,25 @@ def run_periodic_scan_scheduler() -> None:
             start_scan(full_refresh=False)
 
 
+def run_periodic_full_scan_scheduler() -> None:
+    initial_full_scan_pending = True
+    while True:
+        if FULL_SCAN_INTERVAL_SECONDS <= 0:
+            time.sleep(1)
+            continue
+
+        if initial_full_scan_pending:
+            if not get_scan_status().get("running"):
+                start_scan(full_refresh=True)
+                initial_full_scan_pending = False
+            time.sleep(5)
+            continue
+
+        time.sleep(max(1, FULL_SCAN_INTERVAL_SECONDS))
+        if not get_scan_status().get("running"):
+            start_scan(full_refresh=True)
+
+
 def run_periodic_duration_scheduler() -> None:
     while True:
         if DURATION_INTERVAL_SECONDS <= 0:
@@ -1592,6 +1808,9 @@ def start_background_schedulers() -> None:
         if "scan" not in SCHEDULERS_STARTED:
             threading.Thread(target=run_periodic_scan_scheduler, daemon=True).start()
             SCHEDULERS_STARTED.add("scan")
+        if "full_scan" not in SCHEDULERS_STARTED:
+            threading.Thread(target=run_periodic_full_scan_scheduler, daemon=True).start()
+            SCHEDULERS_STARTED.add("full_scan")
         if "duration" not in SCHEDULERS_STARTED:
             threading.Thread(target=run_periodic_duration_scheduler, daemon=True).start()
             SCHEDULERS_STARTED.add("duration")
@@ -1627,6 +1846,8 @@ def build_export_payload(query: Dict[str, List[str]]) -> dict:
     after_date = query.get("after_date", [""])[0]
     after_id = max(0, parse_int(query.get("after_id", ["0"])[0], 0))
     include_cameras = query.get("include_cameras", ["1"])[0] != "0"
+    order = query.get("order", ["asc"])[0].lower()
+    descending = order == "desc"
     file_sql = """
         SELECT
             id,
@@ -1651,11 +1872,11 @@ def build_export_payload(query: Dict[str, List[str]]) -> dict:
           AND capture_date < ?
     """
     file_params: List[object] = [LOCAL_GARAGE, start_date, end_date]
-    if DATE_DIR_PATTERN.match(after_date) and after_id > 0:
+    if not descending and DATE_DIR_PATTERN.match(after_date) and after_id > 0:
         file_sql += " AND (capture_date > ? OR (capture_date = ? AND id > ?))"
         file_params.extend([after_date, after_date, after_id])
         offset = 0
-    file_sql += " ORDER BY capture_date, id"
+    file_sql += " ORDER BY capture_date DESC, id DESC" if descending else " ORDER BY capture_date, id"
     if limit:
         file_sql += " LIMIT ? OFFSET ?"
         file_params.extend([limit + 1, offset])
@@ -1684,7 +1905,7 @@ def build_export_payload(query: Dict[str, List[str]]) -> dict:
     has_more = bool(limit and len(file_rows) > limit)
     if has_more:
         file_rows = file_rows[:limit]
-    next_row = file_rows[-1] if has_more and file_rows else None
+    next_row = file_rows[-1] if has_more and file_rows and not descending else None
 
     return {
         "status": "ok",
@@ -2103,14 +2324,48 @@ def get_remote_sync_range(sync_days: int) -> Tuple[str, str]:
     end_date = (today + timedelta(days=1)).isoformat()
     if sync_days <= 0:
         return "0001-01-01", end_date
-    return (today - timedelta(days=sync_days)).isoformat(), end_date
+    return (today - timedelta(days=max(sync_days, 1) - 1)).isoformat(), end_date
+
+
+def get_remote_sync_phases(sync_days: int, mode: str) -> List[dict]:
+    start_date, end_date = get_remote_sync_range(sync_days)
+    recent_start, recent_end = get_remote_sync_range(INDEX_RECENT_DAYS)
+    phases = [
+        {
+            "name": "recentes",
+            "from": max(start_date, recent_start),
+            "to": min(end_date, recent_end),
+            "order": "desc",
+        }
+    ]
+
+    if mode in {"historico", "full"} and start_date < recent_start:
+        phases.append(
+            {
+                "name": "historico",
+                "from": start_date,
+                "to": min(end_date, recent_start),
+                "order": "desc",
+            }
+        )
+
+    return [
+        phase
+        for phase in phases
+        if phase["from"] < phase["to"]
+    ]
 
 
 def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) -> dict:
     sync_id = f"remote-{garage}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    start_date, end_date = get_remote_sync_range(sync_days)
+    phases = get_remote_sync_phases(sync_days, mode)
+    fallback_start, fallback_end = get_remote_sync_range(sync_days)
+    start_date = fallback_start
+    end_date = fallback_end
     imported_files = 0
     imported_cameras = 0
+    deleted_files = 0
+    deleted_cameras = 0
     pages = 0
     try:
         update_remote_sync_state(current_garage=garage, current_step="healthcheck", mode=mode, sync_days=sync_days)
@@ -2118,49 +2373,70 @@ def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) ->
         if health.get("status") != "ok":
             raise RuntimeError(f"Health remoto inválido: {health}")
         update_remote_garage_state(garage, "online", health=health)
-        offset = 0
-        after_date = ""
-        after_id = 0
-        while True:
-            update_remote_sync_state(current_garage=garage, current_step="export", pages=pages, mode=mode, sync_days=sync_days)
-            export_query = {
-                "from": start_date,
-                "to": end_date,
-                "limit": str(REMOTE_EXPORT_BATCH_SIZE),
-                "include_cameras": "1" if not after_id and offset == 0 else "0",
-            }
-            if after_date and after_id:
-                export_query["after_date"] = after_date
-                export_query["after_id"] = str(after_id)
-            else:
-                export_query["offset"] = str(offset)
-            payload = fetch_remote_json(base_url, "/api/export", export_query)
-            update_remote_sync_state(current_garage=garage, current_step="import", mode=mode, sync_days=sync_days)
-            result = upsert_remote_export(
-                payload,
-                garage,
-                sync_id,
-                prune=False,
-                rebuild_summary=REMOTE_REBUILD_SUMMARY_EACH_PAGE,
-                invalidate_cache=REMOTE_REBUILD_SUMMARY_EACH_PAGE,
-            )
-            imported_files += result["imported_files"]
-            imported_cameras += result["imported_cameras"]
-            pages += 1
-            state = get_remote_sync_state()
+        for phase_index, phase in enumerate(phases):
+            offset = 0
+            after_date = ""
+            after_id = 0
+            include_cameras = phase_index == 0
+            while True:
+                update_remote_sync_state(
+                    current_garage=garage,
+                    current_step=f"export-{phase['name']}",
+                    pages=pages,
+                    mode=mode,
+                    sync_days=sync_days,
+                )
+                export_query = {
+                    "from": phase["from"],
+                    "to": phase["to"],
+                    "limit": str(REMOTE_EXPORT_BATCH_SIZE),
+                    "include_cameras": "1" if include_cameras and not after_id and offset == 0 else "0",
+                    "order": phase["order"],
+                }
+                if after_date and after_id:
+                    export_query["after_date"] = after_date
+                    export_query["after_id"] = str(after_id)
+                else:
+                    export_query["offset"] = str(offset)
+                payload = fetch_remote_json(base_url, "/api/export", export_query)
+                update_remote_sync_state(
+                    current_garage=garage,
+                    current_step=f"import-{phase['name']}",
+                    mode=mode,
+                    sync_days=sync_days,
+                )
+                result = upsert_remote_export(
+                    payload,
+                    garage,
+                    sync_id,
+                    prune=False,
+                    rebuild_summary=REMOTE_REBUILD_SUMMARY_EACH_PAGE,
+                    invalidate_cache=REMOTE_REBUILD_SUMMARY_EACH_PAGE,
+                )
+                imported_files += result["imported_files"]
+                imported_cameras += result["imported_cameras"]
+                pages += 1
+                state = get_remote_sync_state()
+                update_remote_sync_state(
+                    pages=pages,
+                    imported_files=int(state.get("imported_files") or 0) + result["imported_files"],
+                    imported_cameras=int(state.get("imported_cameras") or 0) + result["imported_cameras"],
+                )
+                if not payload.get("has_more"):
+                    break
+                after_date = payload.get("next_after_date") or ""
+                after_id = int(payload.get("next_after_id") or 0)
+                if not after_date or not after_id:
+                    offset = int(payload.get("next_offset") or (offset + REMOTE_EXPORT_BATCH_SIZE))
             update_remote_sync_state(
-                pages=pages,
-                imported_files=int(state.get("imported_files") or 0) + result["imported_files"],
-                imported_cameras=int(state.get("imported_cameras") or 0) + result["imported_cameras"],
+                current_garage=garage,
+                current_step=f"prune-{phase['name']}",
+                mode=mode,
+                sync_days=sync_days,
             )
-            if not payload.get("has_more"):
-                break
-            after_date = payload.get("next_after_date") or ""
-            after_id = int(payload.get("next_after_id") or 0)
-            if not after_date or not after_id:
-                offset = int(payload.get("next_offset") or (offset + REMOTE_EXPORT_BATCH_SIZE))
-        update_remote_sync_state(current_garage=garage, current_step="prune", mode=mode, sync_days=sync_days)
-        prune_result = prune_remote_sync(garage, sync_id, start_date, end_date)
+            prune_result = prune_remote_sync(garage, sync_id, phase["from"], phase["to"])
+            deleted_files += prune_result["deleted_files"]
+            deleted_cameras += prune_result["deleted_cameras"]
         update_remote_garage_state(garage, "online", health=health)
         return {
             "status": "ok",
@@ -2172,7 +2448,8 @@ def sync_remote_garage(garage: str, base_url: str, sync_days: int, mode: str) ->
             "imported_files": imported_files,
             "imported_cameras": imported_cameras,
             "pages": pages,
-            **prune_result,
+            "deleted_files": deleted_files,
+            "deleted_cameras": deleted_cameras,
         }
     except Exception as exc:
         LOGGER.exception("Falha ao sincronizar garagem remota %s", garage)
@@ -2267,12 +2544,14 @@ def run_remote_sync_scheduler() -> None:
 
 
 def run_remote_full_sync_scheduler() -> None:
-    time.sleep(max(1, REMOTE_FULL_SYNC_INTERVAL_SECONDS))
     while True:
         if REMOTE_FULL_SYNC_INTERVAL_SECONDS <= 0 or not parse_remote_garages():
             time.sleep(1)
             continue
-        run_remote_sync_job(sync_days=REMOTE_FULL_SYNC_DAYS, mode="historico")
+        result = run_remote_sync_job(sync_days=REMOTE_FULL_SYNC_DAYS, mode="historico")
+        if result.get("status") == "busy":
+            time.sleep(5)
+            continue
         time.sleep(max(1, REMOTE_FULL_SYNC_INTERVAL_SECONDS))
 
 
@@ -2433,9 +2712,12 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
         params.extend(camera_filters)
 
     where_sql = " AND ".join(clauses)
-    metadata = get_metadata()
 
     with open_db() as connection:
+        metadata = {
+            row["meta_key"]: row["meta_value"]
+            for row in connection.execute("SELECT meta_key, meta_value FROM app_metadata").fetchall()
+        }
         use_summary = summary_has_rows(connection)
         rows = []
         if use_summary:
@@ -2914,6 +3196,7 @@ def dashboard_section(query: Dict[str, List[str]], section: str) -> dict:
         "status": "ok",
         "generated_at": dashboard["generated_at"],
         "filters": dashboard["filters"],
+        "features": dashboard["features"],
     }
     if section == "summary":
         payload["summary"] = dashboard["summary"]

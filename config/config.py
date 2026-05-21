@@ -88,6 +88,11 @@ IMAGE_ROOT = Path(setting("IMAGE_DASHBOARD_ROOT", "/home/publico/imagens"))
 # ---------------------------------------------------------------------------
 LOCAL_GARAGE = setting("IMAGE_DASHBOARD_GARAGE", "G1").strip() or "G1"
 
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
+HOST = setting("IMAGE_DASHBOARD_HOST", "0.0.0.0")
+PORT = env_int("IMAGE_DASHBOARD_PORT", "8082")
 
 # ---------------------------------------------------------------------------
 # Database
@@ -127,19 +132,12 @@ MYSQL_DB = setting("IMAGE_DASHBOARD_MYSQL_DB", "").strip()
 MYSQL_USER = setting("IMAGE_DASHBOARD_MYSQL_USER", "").strip()
 MYSQL_PASSWORD = setting("IMAGE_DASHBOARD_MYSQL_PASSWORD", "").strip()
 
-
-# ---------------------------------------------------------------------------
-# HTTP server
-# ---------------------------------------------------------------------------
-HOST = setting("IMAGE_DASHBOARD_HOST", "0.0.0.0")
-PORT = env_int("IMAGE_DASHBOARD_PORT", "8081")
-
-
 # ---------------------------------------------------------------------------
 # Indexing scheduler
 # ---------------------------------------------------------------------------
 AUTO_SCAN_ON_START = env_bool("IMAGE_DASHBOARD_AUTO_SCAN", "1")
 SCAN_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS", "300")
+FULL_SCAN_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_FULL_SCAN_INTERVAL_SECONDS", "3600")
 SCAN_SORT_ENTRIES = env_bool("IMAGE_DASHBOARD_SCAN_SORT_ENTRIES", "0")
 SCAN_PROGRESS_EVERY_FILES = env_int("IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES", "1000")
 
@@ -149,6 +147,7 @@ SCAN_PROGRESS_EVERY_FILES = env_int("IMAGE_DASHBOARD_SCAN_PROGRESS_EVERY_FILES",
 # ---------------------------------------------------------------------------
 INDEX_FILE_BATCH_SIZE = env_int("IMAGE_DASHBOARD_INDEX_BATCH_SIZE", "10000")
 INDEX_CAMERA_BATCH_SIZE = env_int("IMAGE_DASHBOARD_CAMERA_BATCH_SIZE", "2000")
+INDEX_RECENT_DAYS = env_int("IMAGE_DASHBOARD_INDEX_RECENT_DAYS", "10")
 DATE_DIR_REGEX = setting("IMAGE_DASHBOARD_DATE_DIR_REGEX", r"^\d{4}-\d{2}-\d{2}$")
 TIMESTAMP_FILE_REGEX = setting("IMAGE_DASHBOARD_TIMESTAMP_FILE_REGEX", r"^\d{14}(?:\..+)?$")
 
@@ -173,7 +172,7 @@ FFPROBE_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_FFPROBE_TIMEOUT_SECONDS", "1"
 REMOTE_GARAGES = setting("IMAGE_DASHBOARD_REMOTE_GARAGES", "").strip()
 REMOTE_HEALTH_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_HEALTH_INTERVAL_SECONDS", "120")
 REMOTE_SYNC_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_SYNC_INTERVAL_SECONDS", "180")
-REMOTE_SYNC_DAYS = env_int("IMAGE_DASHBOARD_REMOTE_SYNC_DAYS", "30")
+REMOTE_SYNC_DAYS = env_int("IMAGE_DASHBOARD_REMOTE_SYNC_DAYS", "10")
 REMOTE_FULL_SYNC_INTERVAL_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_FULL_SYNC_INTERVAL_SECONDS", "3600")
 REMOTE_FULL_SYNC_DAYS = env_int("IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS", "0")
 REMOTE_REQUEST_TIMEOUT_SECONDS = env_int("IMAGE_DASHBOARD_REMOTE_TIMEOUT_SECONDS", "60")
