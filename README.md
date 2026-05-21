@@ -1,6 +1,8 @@
 # Dashboard de Imagens
 
-Aplicacao Python para indexar um diretorio de imagens/videos e exibir um relatorio por veiculo, camera, garagem e dia. O banco pode ser SQLite ou PostgreSQL.
+Aplicacao Python para indexar diretorios de imagens/videos e exibir um relatorio por veiculo, camera, garagem e dia.
+
+O banco recomendado para iniciar e operar em producao e o **PostgreSQL**. O SQLite continua disponivel para instalacoes simples, testes locais ou fallback.
 
 ## Estrutura Esperada
 
@@ -13,29 +15,38 @@ Aplicacao Python para indexar um diretorio de imagens/videos e exibir um relator
         20260416093001.jpg
 ```
 
-## Como Executar
+## Requisitos
 
-Instale as dependencias quando for usar PostgreSQL:
+- Python 3.10+
+- PostgreSQL
+- `ffmpeg/ffprobe`, opcional, para coletar duracao dos videos
 
-```bash
-pip install -r requirements.txt
-```
-
-No Windows:
-
-```powershell
-$env:IMAGE_DASHBOARD_ROOT="/home/publico/imagens"
-python app.py
-```
-
-No Linux:
+No Debian/Ubuntu, instale o PostgreSQL com:
 
 ```bash
-export IMAGE_DASHBOARD_ROOT=/home/publico/imagens
-export IMAGE_DASHBOARD_GARAGE=G1
-export IMAGE_DASHBOARD_DB_ENGINE=sqlite
-export IMAGE_DASHBOARD_DB=./db/dashboard_imagens.db
-python3 app.py
+sudo apt install libjson-perl postgresql postgresql-contrib -y
+```
+
+## Instalacao Recomendada
+
+Use o script de instalacao para criar o ambiente virtual, instalar dependencias e gerar a configuracao inicial:
+
+```bash
+./setup.sh
+```
+
+Durante a instalacao, informe:
+
+- identificacao da garagem local, por exemplo `G1`
+- diretorio raiz das imagens
+- banco de dados, por padrao `postgres`
+- dados do PostgreSQL
+- garagens remotas, se houver
+
+Para iniciar a aplicacao depois da instalacao:
+
+```bash
+./run.sh
 ```
 
 Depois acesse:
@@ -50,23 +61,52 @@ Pagina de configuracao:
 http://localhost:8081/config
 ```
 
-## Configuração
+## Instalacao Manual
 
-Veja [.env.example](.env.example) para as variáveis disponíveis.
+Crie o ambiente virtual e instale as dependencias:
 
-### PostgreSQL
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-Crie um banco vazio no PostgreSQL e configure:
+Configure o PostgreSQL:
 
 ```bash
 export IMAGE_DASHBOARD_DB_ENGINE=postgres
+export IMAGE_DASHBOARD_POSTGRES_HOST=127.0.0.1
+export IMAGE_DASHBOARD_POSTGRES_PORT=5432
+export IMAGE_DASHBOARD_POSTGRES_DB=relatorio_cores_dev
+export IMAGE_DASHBOARD_POSTGRES_USER=tecbee
+export IMAGE_DASHBOARD_POSTGRES_PASSWORD=sua_senha
+```
+
+Ou use um DSN manual:
+
+```bash
 export IMAGE_DASHBOARD_POSTGRES_DSN=postgresql://usuario:senha@127.0.0.1:5432/dashboard_imagens
+```
+
+Execute:
+
+```bash
 python3 app.py
 ```
 
-A aplicacao cria as tabelas e indices automaticamente ao iniciar. Para voltar ao SQLite, use `IMAGE_DASHBOARD_DB_ENGINE=sqlite`.
+A aplicacao cria as tabelas e indices automaticamente ao iniciar.
 
-Para migrar os dados atuais do SQLite para o PostgreSQL:
+## SQLite
+
+Para usar SQLite:
+
+```bash
+export IMAGE_DASHBOARD_DB_ENGINE=sqlite
+export IMAGE_DASHBOARD_DB=./db/dashboard_imagens.db
+python3 app.py
+```
+
+Para migrar dados atuais do SQLite para PostgreSQL:
 
 ```bash
 export IMAGE_DASHBOARD_DB=./db/dashboard_imagens.db
@@ -74,56 +114,33 @@ export IMAGE_DASHBOARD_POSTGRES_DSN=postgresql://usuario:senha@127.0.0.1:5432/da
 python3 migrate_sqlite_to_postgres.py
 ```
 
-Principais opções:
+## Configuracao
+
+A configuracao pode vir de tres lugares, nesta ordem:
+
+1. `config/dashboard_config.json`
+2. variaveis de ambiente
+3. defaults em `config/config.py`
+
+Veja [.env.example](.env.example) para as variaveis disponiveis.
+
+Principais opcoes:
 
 ```bash
+export IMAGE_DASHBOARD_ROOT=/home/publico/imagens
+export IMAGE_DASHBOARD_GARAGE=G1
 export IMAGE_DASHBOARD_PORT=8081
 export IMAGE_DASHBOARD_AUTO_SCAN=1
 export IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS=300
-export IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS=300
 export IMAGE_DASHBOARD_ENABLE_DURATION=1
-export IMAGE_DASHBOARD_DURATION_MAX_ATTEMPTS=3
-export IMAGE_DASHBOARD_DURATION_RETRY_SECONDS=3600
+export IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS=300
 ```
 
 Use `0` em `IMAGE_DASHBOARD_SCAN_INTERVAL_SECONDS` ou `IMAGE_DASHBOARD_DURATION_INTERVAL_SECONDS` para desativar os agendadores.
 
-## Rotas
-
-- `/` interface web
-- `/api/dashboard` dados JSON do relatório
-- `/api/summary`, `/api/daily-overview`, `/api/top-cameras`, `/api/matrix`, `/api/filters` retornam blocos separados do dashboard
-- `/api/garage-status` retorna somente o status das garagens
-- `/api/rescan` inicia uma indexação incremental em background
-- `/api/rescan?full=1` executa reindexação completa
-- `/api/scan-status` consulta o status da indexação
-- `/api/duration-status` consulta o status da fila de duração dos vídeos
-- `/api/garage-health` healthcheck da garagem local
-- `/api/export?from=2026-05-01&to=2026-05-13` exporta dados da garagem local
-- `/api/remote-sync` inicia sincronização remota em background
-- `/api/remote-sync?wait=1` força sincronização remota aguardando o fim da execução
-- `/api/remote-status` mostra configuração remota, status e último erro de conexão/sync
-- `/api/remote-health` força uma verificação online/offline das garagens remotas
-- `/api/db-status` mostra modo do SQLite, contagens por garagem e tempo de resposta do banco
-- `/api/config` le e salva configuracoes usadas pela pagina `/config`
-- `/health` healthcheck simples
-
-## Funcionamento
-
-- A indexação incremental inicia automaticamente junto com a aplicação.
-- A indexação incremental roda novamente a cada 5 minutos por padrão.
-- A tela lê dados do SQLite e não varre o filesystem a cada carregamento.
-- Os dados locais são gravados com a garagem configurada em `IMAGE_DASHBOARD_GARAGE`.
-- Garagens remotas podem ser sincronizadas via `IMAGE_DASHBOARD_REMOTE_GARAGES`.
-- Garagens remotas são verificadas a cada 2 minutos por padrão.
-- Garagens remotas são sincronizadas automaticamente a cada 3 minutos por padrão.
-- A duração dos vídeos é preenchida em background quando `ffprobe` está disponível.
-- Falhas de `ffprobe` ficam registradas no banco e são retentadas de forma limitada para a fila não ficar presa nos mesmos vídeos.
-- Veículos em alerta são aqueles sem imagens há 3 dias ou mais, ou sem nenhuma imagem registrada.
-
 ## Garagens Remotas
 
-Na garagem remota, rode a aplicação normalmente com a garagem local configurada:
+Na garagem remota, rode a aplicacao normalmente com a garagem local configurada:
 
 ```bash
 export IMAGE_DASHBOARD_GARAGE=G2
@@ -146,24 +163,45 @@ export IMAGE_DASHBOARD_CACHE_SECONDS=20
 python3 app.py
 ```
 
-A sincronizacao curta roda a cada 3 minutos e busca os ultimos 30 dias.
-A sincronizacao historica roda a cada 1 hora. Use `IMAGE_DASHBOARD_REMOTE_FULL_SYNC_DAYS=0`
-para buscar todo o historico.
-O dashboard usa agregados por veiculo/camera/dia e cache curto configuravel por
-`IMAGE_DASHBOARD_CACHE_SECONDS`.
-
-Se a sincronização remota ainda der timeout, reduza `IMAGE_DASHBOARD_REMOTE_EXPORT_BATCH_SIZE`
-para `500`. A G1 busca a G2 em páginas, então valores menores deixam cada resposta mais leve.
-
 Formato para mais de uma garagem:
 
 ```bash
 export IMAGE_DASHBOARD_REMOTE_GARAGES=G2:http://10.90.0.22:8081;G3:http://10.90.0.23:8081
 ```
 
-## Observações Para Git
+## Rotas
+
+- `/` interface web
+- `/config` pagina de configuracao
+- `/health` healthcheck simples
+- `/api/dashboard` dados JSON do relatorio
+- `/api/summary`, `/api/daily-overview`, `/api/top-cameras`, `/api/matrix`, `/api/filters` retornam blocos separados do dashboard
+- `/api/garage-status` status das garagens
+- `/api/rescan` inicia indexacao incremental em background
+- `/api/rescan?full=1` executa reindexacao completa
+- `/api/scan-status` consulta o status da indexacao
+- `/api/duration-status` consulta o status da fila de duracao dos videos
+- `/api/garage-health` healthcheck da garagem local
+- `/api/export?from=2026-05-01&to=2026-05-13` exporta dados da garagem local
+- `/api/remote-sync` inicia sincronizacao remota em background
+- `/api/remote-sync?wait=1` forca sincronizacao remota aguardando o fim
+- `/api/remote-status` mostra configuracao remota, status e ultimo erro de conexao/sync
+- `/api/remote-health` forca verificacao online/offline das garagens remotas
+- `/api/db-status` mostra status e tempo de resposta do banco
+- `/api/config` le e salva configuracoes usadas pela pagina `/config`
+
+## Funcionamento
+
+- A indexacao incremental inicia automaticamente junto com a aplicacao.
+- A indexacao incremental roda novamente a cada 5 minutos por padrao.
+- A tela le dados do banco e nao varre o filesystem a cada carregamento.
+- Os dados locais sao gravados com a garagem configurada em `IMAGE_DASHBOARD_GARAGE`.
+- Garagens remotas podem ser sincronizadas via `IMAGE_DASHBOARD_REMOTE_GARAGES`.
+- A duracao dos videos e preenchida em background quando `ffprobe` esta disponivel.
+- Veiculos em alerta sao aqueles sem imagens ha 3 dias ou mais, ou sem nenhuma imagem registrada.
+
+## Observacoes Para Git
 
 - Bancos SQLite, caches Python, logs e `.env` ficam fora do Git via `.gitignore`.
-- Configurações e variáveis de ambiente ficam centralizadas em `config.py`.
-- O projeto não exige `requirements.txt` porque usa apenas biblioteca padrão do Python.
-- Para calcular duração de vídeos, instale `ffmpeg/ffprobe` no servidor.
+- Configuracoes ficam centralizadas em `config/config.py` e podem ser sobrescritas pela pagina `/config`.
+- Para calcular duracao de videos, instale `ffmpeg/ffprobe` no servidor.

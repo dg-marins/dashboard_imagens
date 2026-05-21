@@ -27,6 +27,7 @@ const monthNames = [
 ];
 
 let scanPollTimer = null;
+let lastScanPublishKey = "";
 let dashboardRequestId = 0;
 let dashboardRefreshTimer = null;
 let dashboardLoading = false;
@@ -470,6 +471,25 @@ function buildQuery() {
   return params.toString();
 }
 
+function buildDashboardQuery(options = {}) {
+  const { animateChanges = false } = options;
+  const query = new URLSearchParams(buildQuery());
+  query.set("_refresh", String(Date.now()));
+  if (animateChanges) {
+    query.set("_live", "1");
+  }
+  return query;
+}
+
+async function fetchDashboardSection(section, query) {
+  const response = await fetch(`/api/${section}?${query.toString()}`, {cache: "no-store"});
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.message || `A API retornou erro ao montar ${section}.`);
+  }
+  return data;
+}
+
 function renderSummary(summary) {
   summaryGrid.innerHTML = "";
 
@@ -580,7 +600,26 @@ function startScanPolling() {
   if (scanPollTimer) return;
   scanPollTimer = window.setInterval(async () => {
     const scan = await syncScanStatus();
+    if (scan && scan.running) {
+      const publishKey = [
+        scan.scan_id || "",
+        scan.published_dates || 0,
+        scan.last_published_at || "",
+        scan.recent_ready ? "1" : "0",
+      ].join(":");
+      if (publishKey !== lastScanPublishKey) {
+        lastScanPublishKey = publishKey;
+        await loadDashboard({
+          showLoading: false,
+          animateAll: false,
+          animateChanges: true,
+          includeMatrix: Boolean(scan.published_dates),
+        });
+      }
+      return;
+    }
     if (scan && !scan.running) {
+      lastScanPublishKey = "";
       await loadDashboard();
     }
   }, 2500);
@@ -732,7 +771,12 @@ function renderFeatures(features = {}) {
 }
 
 async function loadDashboard(options = {}) {
-  const { showLoading = true, animateAll = true, animateChanges = false } = options;
+  const {
+    showLoading = true,
+    animateAll = true,
+    animateChanges = false,
+    includeMatrix = true,
+  } = options;
   if (dashboardLoading && !showLoading) {
     return;
   }
@@ -745,28 +789,30 @@ async function loadDashboard(options = {}) {
   }
 
   try {
-    const query = new URLSearchParams(buildQuery());
-    query.set("_refresh", String(Date.now()));
-    if (animateChanges) {
-      query.set("_live", "1");
-    }
-    const response = await fetch(`/api/dashboard?${query.toString()}`, {cache: "no-store"});
-    const data = await response.json();
+    const query = buildDashboardQuery({animateChanges});
+    const [filtersData, summaryData, dailyData] = await Promise.all([
+      fetchDashboardSection("filters", query),
+      fetchDashboardSection("summary", query),
+      fetchDashboardSection("daily-overview", query),
+    ]);
 
     if (requestId !== dashboardRequestId) {
       return;
     }
 
-    if (!response.ok) {
-      throw new Error(data.message || "A API retornou erro ao montar o relatório.");
-    }
+    renderFilterOptions(filtersData.available_filters);
+    renderSummary(summaryData.summary);
+    renderGarageStatus(summaryData.garage_status);
+    renderDaily(dailyData.daily_overview);
+    renderFeatures(summaryData.features);
 
-    renderFilterOptions(data.available_filters);
-    renderSummary(data.summary);
-    renderGarageStatus(data.garage_status);
-    renderDaily(data.daily_overview);
-    renderMatrix(data.dates, data.rows, data.summary.fleet_total);
-    renderFeatures(data.features);
+    if (includeMatrix) {
+      const matrixData = await fetchDashboardSection("matrix", query);
+      if (requestId !== dashboardRequestId) {
+        return;
+      }
+      renderMatrix(matrixData.dates, matrixData.rows, matrixData.fleet_total);
+    }
     setSectionLoading(false);
     if (animateChanges && previousValues) {
       markChangedValues(previousValues);
@@ -774,7 +820,7 @@ async function loadDashboard(options = {}) {
       animateSectionUpdate();
     }
 
-    if (data.scan_info && data.scan_info.current_status && data.scan_info.current_status.running) {
+    if (summaryData.scan_info && summaryData.scan_info.current_status && summaryData.scan_info.current_status.running) {
       startScanPolling();
     }
   } catch (error) {
@@ -797,7 +843,7 @@ function startDashboardAutoRefresh() {
   if (dashboardRefreshTimer) return;
   dashboardRefreshTimer = window.setInterval(() => {
     if (document.hidden) return;
-    loadDashboard({ showLoading: false, animateAll: false, animateChanges: true });
+    loadDashboard({ showLoading: false, animateAll: false, animateChanges: true, includeMatrix: false });
   }, DASHBOARD_REFRESH_INTERVAL_MS);
 }
 
@@ -809,7 +855,7 @@ function stopDashboardAutoRefresh() {
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) return;
-  loadDashboard({ showLoading: false, animateAll: false, animateChanges: true });
+  loadDashboard({ showLoading: false, animateAll: false, animateChanges: true, includeMatrix: false });
 });
 
 function resetFilters() {
