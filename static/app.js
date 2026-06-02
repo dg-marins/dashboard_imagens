@@ -32,6 +32,8 @@ let dashboardRequestId = 0;
 let dashboardRefreshTimer = null;
 let dashboardLoading = false;
 const DASHBOARD_REFRESH_INTERVAL_MS = 20000;
+const DEFAULT_ROLLING_DAYS = 7;
+let dateMode = "rolling";
 
 function updateStickyOffsets() {
   if (!filtersBar) return;
@@ -183,9 +185,13 @@ function fillDateFilters() {
 
 function todayInputValue() {
   const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
+  return formatLocalDate(now);
+}
+
+function formatLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
@@ -308,6 +314,15 @@ function matrixDateHeader(date) {
 }
 
 function currentMatrixDates() {
+  if (dateMode === "rolling") {
+    const today = new Date();
+    return Array.from({length: DEFAULT_ROLLING_DAYS}).map((_, offset) => {
+      const current = new Date(today);
+      current.setDate(today.getDate() - offset);
+      return formatLocalDate(current);
+    });
+  }
+
   const month = Number(monthSelect.value || new Date().getMonth() + 1);
   const year = Number(yearSelect.value || new Date().getFullYear());
   const today = new Date();
@@ -463,8 +478,14 @@ function friendlyLoadError(error) {
 
 function buildQuery() {
   const params = new URLSearchParams();
-  params.set("month", monthSelect.value);
-  params.set("year", yearSelect.value);
+  if (dateMode === "rolling") {
+    params.set("date_mode", "rolling");
+    params.set("days", String(DEFAULT_ROLLING_DAYS));
+  } else {
+    params.set("date_mode", "month");
+    params.set("month", monthSelect.value);
+    params.set("year", yearSelect.value);
+  }
   selectedValues(garageSelect).forEach((garage) => params.append("garage", garage));
   selectedValues(vehicleSelect).forEach((vehicle) => params.append("vehicle", vehicle));
   selectedValues(cameraSelect).forEach((camera) => params.append("camera", camera));
@@ -866,11 +887,18 @@ function resetFilters() {
   const now = new Date();
   monthSelect.value = String(now.getMonth() + 1);
   yearSelect.value = String(now.getFullYear());
+  dateMode = "rolling";
   loadDashboard();
 }
 
-monthSelect.addEventListener("change", loadDashboard);
-yearSelect.addEventListener("change", loadDashboard);
+monthSelect.addEventListener("change", () => {
+  dateMode = "month";
+  loadDashboard();
+});
+yearSelect.addEventListener("change", () => {
+  dateMode = "month";
+  loadDashboard();
+});
 resetButton.addEventListener("click", resetFilters);
 if (openExportXlsxButton) {
   openExportXlsxButton.addEventListener("click", () => {

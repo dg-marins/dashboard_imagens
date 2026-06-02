@@ -438,6 +438,45 @@ def build_month_dates(month: int, year: int) -> List[str]:
     ]
 
 
+def build_rolling_dates(days: int = 7) -> List[str]:
+    total_days = max(1, min(days, 62))
+    today = date.today()
+    return [
+        (today - timedelta(days=offset)).isoformat()
+        for offset in range(total_days)
+    ]
+
+
+def parse_dashboard_date_range(query: Dict[str, List[str]]) -> Tuple[str, str, List[str], dict]:
+    date_mode = query.get("date_mode", ["month"])[0]
+    if date_mode == "rolling":
+        days = max(1, min(parse_int(query.get("days", ["7"])[0], 7), 62))
+        dates = build_rolling_dates(days)
+        start_date = dates[-1]
+        end_date = (date.today() + timedelta(days=1)).isoformat()
+        return start_date, end_date, dates, {
+            "date_mode": "rolling",
+            "days": days,
+            "month": date.today().month,
+            "year": date.today().year,
+        }
+
+    month, year = parse_month_year(query)
+    month_start = f"{year:04d}-{month:02d}-01"
+    next_month = month + 1
+    next_month_year = year
+    if next_month == 13:
+        next_month = 1
+        next_month_year += 1
+    next_month_start = f"{next_month_year:04d}-{next_month:02d}-01"
+    dates = build_month_dates(month, year)
+    return month_start, next_month_start, dates, {
+        "date_mode": "month",
+        "month": month,
+        "year": year,
+    }
+
+
 def get_level(count: int) -> str:
     chosen = "none"
     for threshold, level in DAY_LEVELS:
@@ -2816,20 +2855,13 @@ def build_db_status() -> dict:
 
 def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
     ensure_database()
-    month, year = parse_month_year(query)
-    month_start = f"{year:04d}-{month:02d}-01"
-    next_month = month + 1
-    next_month_year = year
-    if next_month == 13:
-        next_month = 1
-        next_month_year += 1
-    next_month_start = f"{next_month_year:04d}-{next_month:02d}-01"
+    start_date, end_date, dates, date_filters = parse_dashboard_date_range(query)
     garage_filters = parse_multi_filter(query, "garage")
     vehicle_filters = parse_multi_filter(query, "vehicle")
     camera_filters = parse_multi_filter(query, "camera")
 
     clauses = ["capture_date >= ?", "capture_date < ?"]
-    params: List[str] = [month_start, next_month_start]
+    params: List[str] = [start_date, end_date]
 
     if garage_filters:
         clauses.append(f"garage IN ({', '.join('?' for _ in garage_filters)})")
@@ -3144,7 +3176,6 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
             matrix[matrix_key]["latest_file"], row["latest_file"]
         ) if matrix[matrix_key]["latest_file"] else row["latest_file"]
 
-    dates = build_month_dates(month, year)
     for capture_date in dates:
         date_totals.setdefault(capture_date, 0)
         date_sizes.setdefault(capture_date, 0)
@@ -3228,8 +3259,7 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
         "root": str(IMAGE_ROOT),
         "database": str(DB_PATH),
         "filters": {
-            "month": month,
-            "year": year,
+            **date_filters,
             "garages": garage_filters,
             "vehicles": vehicle_filters,
             "cameras": camera_filters,
