@@ -68,7 +68,14 @@
         <div id="exportXlsxBox" class="export-xlsx-box hidden">
           <button id="openExportXlsx" type="button">Exportar</button>
           <form id="exportXlsxForm" class="export-xlsx-form hidden">
-            <input id="exportDate" type="date" aria-label="Data da exportação">
+            <label>
+              <span>De:</span>
+              <input id="exportDateFrom" type="date" aria-label="Data inicial da exportação">
+            </label>
+            <label>
+              <span>Até:</span>
+              <input id="exportDateTo" type="date" aria-label="Data final da exportação">
+            </label>
             <button type="submit">Baixar</button>
           </form>
         </div>

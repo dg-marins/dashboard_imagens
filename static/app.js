@@ -19,7 +19,8 @@ const summaryCardTemplate = document.getElementById("summaryCardTemplate");
 const exportXlsxBox = document.getElementById("exportXlsxBox");
 const openExportXlsxButton = document.getElementById("openExportXlsx");
 const exportXlsxForm = document.getElementById("exportXlsxForm");
-const exportDateInput = document.getElementById("exportDate");
+const exportDateFromInput = document.getElementById("exportDateFrom");
+const exportDateToInput = document.getElementById("exportDateTo");
 
 const monthNames = [
   "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
@@ -186,6 +187,37 @@ function fillDateFilters() {
 function todayInputValue() {
   const now = new Date();
   return formatLocalDate(now);
+}
+
+function dateDaysAgoValue(daysAgo) {
+  const value = new Date();
+  value.setDate(value.getDate() - daysAgo);
+  return formatLocalDate(value);
+}
+
+function clampExportDateRange(changedField = "from") {
+  if (!exportDateFromInput || !exportDateToInput) return;
+  if (!exportDateFromInput.value) exportDateFromInput.value = dateDaysAgoValue(6);
+  if (!exportDateToInput.value) exportDateToInput.value = todayInputValue();
+
+  const startDate = new Date(`${exportDateFromInput.value}T00:00:00`);
+  const endDate = new Date(`${exportDateToInput.value}T00:00:00`);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return;
+
+  if (endDate < startDate) {
+    if (changedField === "to") {
+      exportDateFromInput.value = exportDateToInput.value;
+    } else {
+      exportDateToInput.value = exportDateFromInput.value;
+    }
+    return;
+  }
+
+  const maxEndDate = new Date(startDate);
+  maxEndDate.setDate(startDate.getDate() + 6);
+  if (endDate > maxEndDate) {
+    exportDateToInput.value = formatLocalDate(maxEndDate);
+  }
 }
 
 function formatLocalDate(date) {
@@ -786,8 +818,11 @@ function renderFeatures(features = {}) {
     exportXlsxForm?.classList.add("hidden");
     openExportXlsxButton?.classList.remove("hidden");
   }
-  if (enabled && exportDateInput && !exportDateInput.value) {
-    exportDateInput.value = todayInputValue();
+  if (enabled && exportDateFromInput && !exportDateFromInput.value) {
+    exportDateFromInput.value = dateDaysAgoValue(6);
+  }
+  if (enabled && exportDateToInput && !exportDateToInput.value) {
+    exportDateToInput.value = todayInputValue();
   }
 }
 
@@ -902,21 +937,26 @@ yearSelect.addEventListener("change", () => {
 resetButton.addEventListener("click", resetFilters);
 if (openExportXlsxButton) {
   openExportXlsxButton.addEventListener("click", () => {
-    if (!exportDateInput.value) exportDateInput.value = todayInputValue();
+    if (exportDateFromInput && !exportDateFromInput.value) exportDateFromInput.value = dateDaysAgoValue(6);
+    if (exportDateToInput && !exportDateToInput.value) exportDateToInput.value = todayInputValue();
     openExportXlsxButton.classList.add("hidden");
     exportXlsxForm.classList.remove("hidden");
-    exportDateInput.focus();
+    exportDateFromInput?.focus();
   });
 }
 if (exportXlsxForm) {
   exportXlsxForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    const selectedDate = exportDateInput?.value || todayInputValue();
-    window.location.href = `/api/export-xlsx?date=${encodeURIComponent(selectedDate)}`;
+    clampExportDateRange();
+    const startDate = exportDateFromInput?.value || dateDaysAgoValue(6);
+    const endDate = exportDateToInput?.value || todayInputValue();
+    window.location.href = `/api/export-xlsx?from=${encodeURIComponent(startDate)}&to=${encodeURIComponent(endDate)}`;
     exportXlsxForm.classList.add("hidden");
     openExportXlsxButton?.classList.remove("hidden");
   });
 }
+exportDateFromInput?.addEventListener("change", () => clampExportDateRange("from"));
+exportDateToInput?.addEventListener("change", () => clampExportDateRange("to"));
 
 window.addEventListener("beforeunload", () => {
   stopScanPolling();
@@ -930,7 +970,8 @@ if (window.ResizeObserver && filtersBar) {
 
 updateStickyOffsets();
 fillDateFilters();
-if (exportDateInput) exportDateInput.value = todayInputValue();
+if (exportDateFromInput) exportDateFromInput.value = dateDaysAgoValue(6);
+if (exportDateToInput) exportDateToInput.value = todayInputValue();
 syncScanStatus();
 loadDashboard();
 startDashboardAutoRefresh();

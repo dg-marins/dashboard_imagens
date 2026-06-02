@@ -2106,6 +2106,27 @@ def parse_report_date(query: Dict[str, List[str]]) -> str:
     return selected_date
 
 
+def parse_report_date_range(query: Dict[str, List[str]]) -> List[str]:
+    start_raw = query.get("from", query.get("date", [date.today().isoformat()]))[0]
+    end_raw = query.get("to", [start_raw])[0]
+    if not DATE_DIR_PATTERN.match(start_raw) or not DATE_DIR_PATTERN.match(end_raw):
+        raise ValueError("Data invalida para exportacao.")
+
+    start_date = datetime.strptime(start_raw, "%Y-%m-%d").date()
+    end_date = datetime.strptime(end_raw, "%Y-%m-%d").date()
+    if end_date < start_date:
+        raise ValueError("Data final nao pode ser menor que a inicial.")
+
+    total_days = (end_date - start_date).days + 1
+    if total_days > 7:
+        raise ValueError("A exportacao XLSX permite no maximo 7 dias.")
+
+    return [
+        (start_date + timedelta(days=offset)).isoformat()
+        for offset in range(total_days)
+    ]
+
+
 def report_status_for_count(total_files: int) -> str:
     if total_files == 0:
         return "inoperante"
@@ -2302,10 +2323,15 @@ def build_xlsx_workbook(headers: List[str], rows: List[List[object]], sheet_name
 def build_daily_xlsx_export(query: Dict[str, List[str]]) -> Tuple[str, bytes]:
     if not EXPORT_XLSX_ENABLED:
         raise PermissionError("Exportacao XLSX desabilitada.")
-    selected_date = parse_report_date(query)
+    selected_dates = parse_report_date_range(query)
     headers = ["Carro", "Status", "Data", "Mes", "Ano", "Dia", "", "Garagem"]
-    rows = build_daily_export_rows(selected_date)
-    filename = f"relatorio_cores_{selected_date}.xlsx"
+    rows: List[List[object]] = []
+    for selected_date in selected_dates:
+        rows.extend(build_daily_export_rows(selected_date))
+    if len(selected_dates) == 1:
+        filename = f"relatorio_cores_{selected_dates[0]}.xlsx"
+    else:
+        filename = f"relatorio_cores_{selected_dates[0]}_a_{selected_dates[-1]}.xlsx"
     return filename, build_xlsx_workbook(headers, rows)
 
 
