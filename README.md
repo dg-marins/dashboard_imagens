@@ -74,7 +74,18 @@ Execute:
 python3 app.py
 ```
 
-A aplicacao cria tabelas, colunas e indices automaticamente ao iniciar.
+A aplicacao cria tabelas, colunas e indices comuns automaticamente ao iniciar. Em PostgreSQL,
+o indice da fila de duracao e uma migracao separada para evitar uma criacao bloqueante
+na inicializacao de bancos grandes. Antes de executar a nova versao em um banco existente,
+aplique `migrations/2026_10_16_duration_pending_index.sql` com `psql -f`, com autocommit
+habilitado e fora de uma transacao explicita. O script usa `CREATE INDEX CONCURRENTLY`.
+
+A fila le no maximo `IMAGE_DASHBOARD_DURATION_MAX_FILES_PER_RUN` videos por rodada.
+O total de pendentes tambem e limitado a esse valor mais um; quando
+`last_duration_pending_files_exact` e falso, `last_duration_pending_files` e um
+limite inferior, nao uma contagem total. Isso evita outra varredura completa
+da tabela ao final de cada rodada. Verifique o plano da consulta com `EXPLAIN`
+e monitore `pg_stat_user_indexes` antes de considerar a remocao do indice antigo.
 
 Acesse:
 

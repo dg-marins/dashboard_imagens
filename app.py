@@ -134,6 +134,7 @@ DURATION_STATE = {
     "processed_files": 0,
     "updated_files": 0,
     "pending_files": 0,
+    "pending_files_exact": True,
     "current_file": None,
 }
 REMOTE_LOCK = threading.Lock()
@@ -788,13 +789,15 @@ def ensure_database_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_indexed_files_garage_capture_id
                 ON indexed_files (garage, capture_date, id);
 
-            CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_retry_queue
-                ON indexed_files (duration_seconds, extension, duration_probe_attempts, duration_probe_at, id);
-
             CREATE INDEX IF NOT EXISTS idx_camera_inventory_garage_vehicle_camera
                 ON camera_inventory (garage, vehicle, camera);
             """
         )
+        if not is_postgres():
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_pending_id "
+                "ON indexed_files (id) WHERE duration_seconds IS NULL"
+            )
         connection.commit()
 
 
@@ -1765,16 +1768,21 @@ def hydrate_missing_durations() -> dict:
         if (success_batch or failure_batch) and not get_scan_status().get("running"):
             flush_duration_batches()
 
-        remaining_pending = connection.execute(
+        pending_limit = max(1, DURATION_MAX_FILES_PER_RUN) + 1
+        remaining_rows = connection.execute(
             f"""
-            SELECT COUNT(*) AS total
+            SELECT id
             FROM indexed_files
             WHERE duration_seconds IS NULL
               AND LOWER(extension) IN ({extension_placeholders})
               AND COALESCE(duration_probe_attempts, 0) < ?
+            ORDER BY id
+            LIMIT ?
             """,
-            (*video_extensions, max_attempts),
-        ).fetchone()["total"]
+            (*video_extensions, max_attempts, pending_limit),
+        ).fetchall()
+        remaining_pending = len(remaining_rows)
+        pending_files_exact = remaining_pending < pending_limit
 
         finished_at = iso_now()
         set_metadata(connection, "last_duration_started_at", started_at)
@@ -1784,6 +1792,7 @@ def hydrate_missing_durations() -> dict:
         set_metadata(connection, "last_duration_updated_files", str(updated_files))
         set_metadata(connection, "last_duration_failed_files", str(failed_files))
         set_metadata(connection, "last_duration_pending_files", str(remaining_pending))
+        set_metadata(connection, "last_duration_pending_files_exact", "1" if pending_files_exact else "0")
         set_metadata(connection, "last_duration_status", "ok")
         connection.commit()
 
@@ -1795,6 +1804,7 @@ def hydrate_missing_durations() -> dict:
         "updated_files": updated_files,
         "failed_files": failed_files,
         "pending_files": remaining_pending,
+        "pending_files_exact": pending_files_exact,
     }
 
 
@@ -1808,6 +1818,7 @@ def run_duration_job() -> None:
             DURATION_STATE["processed_files"] = result.get("processed_files", 0)
             DURATION_STATE["updated_files"] = result.get("updated_files", 0)
             DURATION_STATE["pending_files"] = result.get("pending_files", 0)
+            DURATION_STATE["pending_files_exact"] = result.get("pending_files_exact", True)
             DURATION_STATE["current_file"] = None
     except Exception as exc:
         LOGGER.exception("Falha no job de duracao")
@@ -1851,6 +1862,7 @@ def start_duration_job() -> dict:
         DURATION_STATE["processed_files"] = 0
         DURATION_STATE["updated_files"] = 0
         DURATION_STATE["pending_files"] = 0
+        DURATION_STATE["pending_files_exact"] = True
         DURATION_STATE["current_file"] = None
 
     worker = threading.Thread(target=run_duration_job, daemon=True)
@@ -3344,6 +3356,7 @@ def build_dashboard_payload(query: Dict[str, List[str]]) -> dict:
                 "last_duration_updated_files": metadata.get("last_duration_updated_files", "0"),
                 "last_duration_failed_files": metadata.get("last_duration_failed_files", "0"),
                 "last_duration_pending_files": metadata.get("last_duration_pending_files", "0"),
+                "last_duration_pending_files_exact": metadata.get("last_duration_pending_files_exact", "1") == "1",
                 "last_duration_status": metadata.get("last_duration_status"),
                 "current_status": get_duration_status(),
             },
