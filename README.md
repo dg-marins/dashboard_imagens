@@ -78,7 +78,10 @@ A aplicacao cria tabelas, colunas e indices comuns automaticamente ao iniciar. E
 o indice da fila de duracao e uma migracao separada para evitar uma criacao bloqueante
 na inicializacao de bancos grandes. Antes de executar a nova versao em um banco existente,
 aplique `migrations/2026_10_16_duration_pending_index.sql` com `psql -f`, com autocommit
-habilitado e fora de uma transacao explicita. O script usa `CREATE INDEX CONCURRENTLY`.
+habilitado e fora de uma transacao explicita. O script usa `CREATE INDEX CONCURRENTLY`
+e coleta estatisticas da expressao `lower(extension)`, necessarias para o planejador
+estimar a fila corretamente. A ordem da fila prioriza arquivos ainda sem tentativa,
+seguida das tentativas de repeticao, mantendo a ordem de `id` dentro de cada grupo.
 
 A fila le no maximo `IMAGE_DASHBOARD_DURATION_MAX_FILES_PER_RUN` videos por rodada.
 O total de pendentes tambem e limitado a esse valor mais um; quando

@@ -1,9 +1,12 @@
 -- Run with psql autocommit enabled, outside an explicit transaction.
 -- The dashboard must use the revised bounded duration query before the old index is removed.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_indexed_files_duration_pending_id
-    ON public.indexed_files (id)
-    INCLUDE (extension, duration_probe_attempts, duration_probe_at)
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_indexed_files_duration_attempt_id
+    ON public.indexed_files (duration_probe_attempts, id)
+    INCLUDE (extension, duration_probe_at)
     WHERE duration_seconds IS NULL;
+
+CREATE STATISTICS IF NOT EXISTS indexed_files_duration_extension_stats
+    ON (lower(extension)) FROM public.indexed_files;
 
 ANALYZE public.indexed_files;
 

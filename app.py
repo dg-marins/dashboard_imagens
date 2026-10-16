@@ -795,8 +795,8 @@ def ensure_database_schema() -> None:
         )
         if not is_postgres():
             connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_pending_id "
-                "ON indexed_files (id) WHERE duration_seconds IS NULL"
+                "CREATE INDEX IF NOT EXISTS idx_indexed_files_duration_attempt_id "
+                "ON indexed_files (duration_probe_attempts, id) WHERE duration_seconds IS NULL"
             )
         connection.commit()
 
@@ -1695,9 +1695,9 @@ def hydrate_missing_durations() -> dict:
             FROM indexed_files
             WHERE duration_seconds IS NULL
               AND LOWER(extension) IN ({extension_placeholders})
-              AND COALESCE(duration_probe_attempts, 0) < ?
+              AND duration_probe_attempts < ?
               AND (duration_probe_at IS NULL OR duration_probe_at <= ?)
-            ORDER BY id
+            ORDER BY duration_probe_attempts, id
             LIMIT ?
             """,
             (*video_extensions, max_attempts, retry_cutoff, max(1, DURATION_MAX_FILES_PER_RUN)),
@@ -1775,8 +1775,8 @@ def hydrate_missing_durations() -> dict:
             FROM indexed_files
             WHERE duration_seconds IS NULL
               AND LOWER(extension) IN ({extension_placeholders})
-              AND COALESCE(duration_probe_attempts, 0) < ?
-            ORDER BY id
+              AND duration_probe_attempts < ?
+            ORDER BY duration_probe_attempts, id
             LIMIT ?
             """,
             (*video_extensions, max_attempts, pending_limit),

@@ -22,8 +22,8 @@ class DurationQueueTests(unittest.TestCase):
                         duration_probe_error TEXT, duration_probe_at TEXT
                     );
                     CREATE TABLE app_metadata (meta_key TEXT PRIMARY KEY, meta_value TEXT);
-                    CREATE INDEX idx_indexed_files_duration_pending_id
-                        ON indexed_files (id) WHERE duration_seconds IS NULL;
+                    CREATE INDEX idx_indexed_files_duration_attempt_id
+                        ON indexed_files (duration_probe_attempts,id) WHERE duration_seconds IS NULL;
                     """
                 )
                 connection.executemany(
@@ -42,11 +42,11 @@ class DurationQueueTests(unittest.TestCase):
                 plan = connection.execute(
                     "EXPLAIN QUERY PLAN SELECT id,source_path,file_name FROM indexed_files "
                     "WHERE duration_seconds IS NULL AND LOWER(extension) IN ('.mp4') "
-                    "AND COALESCE(duration_probe_attempts,0)<3 "
+                    "AND duration_probe_attempts<3 "
                     "AND (duration_probe_at IS NULL OR duration_probe_at<='2026-10-16') "
-                    "ORDER BY id LIMIT 2"
+                    "ORDER BY duration_probe_attempts,id LIMIT 2"
                 ).fetchall()
-                self.assertIn("idx_indexed_files_duration_pending_id", str(plan))
+                self.assertIn("idx_indexed_files_duration_attempt_id", str(plan))
 
             opened = []
 
@@ -72,13 +72,13 @@ class DurationQueueTests(unittest.TestCase):
                  patch.object(dashboard, "VIDEO_EXTENSIONS", {".mp4"}):
                 result = dashboard.hydrate_missing_durations()
                 with connect() as connection:
-                    connection.execute("UPDATE indexed_files SET duration_probe_attempts=3 WHERE id IN (6,7)")
+                    connection.execute("UPDATE indexed_files SET duration_probe_attempts=3 WHERE id IN (2,7)")
                 no_due_rows = dashboard.hydrate_missing_durations()
                 with connect() as connection:
                     connection.execute("UPDATE indexed_files SET duration_probe_attempts=3 WHERE id=3")
                 empty = dashboard.hydrate_missing_durations()
 
-            self.assertEqual(["first.mp4", "second.mp4"], processed)
+            self.assertEqual(["first.mp4", "third.mp4"], processed)
             self.assertEqual(2, result["processed_files"])
             self.assertEqual(3, result["pending_files"])
             self.assertFalse(result["pending_files_exact"])
@@ -89,7 +89,7 @@ class DurationQueueTests(unittest.TestCase):
             self.assertTrue(empty["pending_files_exact"])
             with connect() as connection:
                 rows = connection.execute("SELECT id,duration_seconds FROM indexed_files ORDER BY id").fetchall()
-                self.assertEqual([12.0, 12.0, None, None, None, None, None],
+                self.assertEqual([12.0, None, None, None, None, 12.0, None],
                                  [row["duration_seconds"] for row in rows])
             for connection in opened:
                 connection.close()
